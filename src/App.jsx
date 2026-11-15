@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Peer from "peerjs";
 import { BookOpenCheck, Bot, Check, ChevronRight, Clock3, Copy, Crown, Gem, HelpCircle, LockKeyhole, LogOut, Play, RotateCcw, Share2, Sparkles, Users, X } from "lucide-react";
 import {
   ALL_TOKENS,
@@ -12,8 +11,10 @@ import {
   playerBonuses,
   playerScore,
   tokenTotal,
+  viewFor,
 } from "./game.js";
 import { BOT_LEVELS, chooseBotAction, playTimedTurn } from "./bot.js";
+import { openGuestLink, openHostLink } from "./net.js";
 import TutorialDialog from "./Tutorial.jsx";
 
 const AVATARS = {
@@ -40,21 +41,11 @@ const loadSession = () => {
     return session && Date.now() - session.savedAt < SESSION_TTL_MS ? session : null;
   } catch { return null; }
 };
-const peerIdFor = (code) => `gemfriends-${code.toLowerCase()}`;
-// 서로 다른 와이파이/데이터망에서도 이어지도록 STUN 외에 공개 TURN 중계 서버를 함께 써요.
-// (무료 공용 중계라 속도는 느릴 수 있어요. 직접 연결이 되면 중계 없이 바로 연결돼요.)
-const PEER_OPTIONS = {
-  config: {
-    iceServers: [
-      { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
-      { urls: ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443", "turn:openrelay.metered.ca:443?transport=tcp"], username: "openrelayproject", credential: "openrelayproject" },
-    ],
-  },
-};
-const MSG_SERVER = "연결 서버에 닿지 못했어요. 인터넷 연결을 확인하고 다시 시도해주세요.";
+const publicProfile = ({ key, ...rest }) => rest; // 본인 확인용 key는 다른 사람에게 보내지 않아요.
 const MSG_NOTFOUND = "방을 찾지 못했어요. 코드가 맞는지, 방장이 방 화면에 있는지 확인해주세요.";
-const MSG_TIMEOUT = "방장과 연결이 이어지지 않아요. 방장 화면이 켜져 있는지 확인하고 다시 시도해주세요.";
-const CONNECT_TIMEOUT_MS = 15000;
+const MSG_SERVER = "연결 서버에 닿지 못했어요. 인터넷 연결을 확인하고 다시 시도해주세요.";
+const BEAT_MS = 4000;
+const HOST_SILENT_MS = 12000;
 
 function useMultiplayer() {
   const [mode, setMode] = useState("landing");
@@ -64,152 +55,117 @@ function useMultiplayer() {
   const [error, setError] = useState("");
   const [connectionState, setConnectionState] = useState("idle");
   const [connectStatus, setConnectStatus] = useState("");
-  const serverTimerRef = useRef(null);
-  const sessionRef = useRef(null); // 연결이 한 번이라도 성립한 방. 있으면 끊겨도 계속 복구를 시도해요.
-  const connectedRef = useRef(false);
-  const lastSeenRef = useRef(0);
-  const lastRebuildRef = useRef(0);
-  const disconnectedSinceRef = useRef(0);
-  const tickRef = useRef(() => {});
-  const peerRef = useRef(null);
-  const hostConnectionRef = useRef(null);
-  const guestConnectionsRef = useRef(new Map());
+  const linkRef = useRef(null);
   const profileRef = useRef(null);
   const isHostRef = useRef(false);
   const lobbyRef = useRef(null);
   const gameRef = useRef(null);
-  const retryRef = useRef(null);
+  const sessionRef = useRef(null); // 연결이 한 번이라도 성립한 방. 있으면 끊겨도 계속 복구를 시도해요.
+  const keysRef = useRef(new Map()); // 방장 전용: 플레이어 id → 본인 확인 key
+  const seenRef = useRef(new Map()); // 방장 전용: 플레이어 id → 마지막 신호 시각
+  const revRef = useRef(0);
+  const guestRevRef = useRef(null);
+  const lastSeenRef = useRef(0);
+  const joinedRef = useRef(false);
+  const downSinceRef = useRef(0);
+  const lastRebuildRef = useRef(0);
+  const hostIndexRef = useRef(0);
+  const generationRef = useRef(0); // 낡은 연결에서 늦게 도착한 콜백을 무시하기 위한 번호
+  const tickRef = useRef(() => {});
 
-  const setLobbyState = useCallback((next) => {
-    lobbyRef.current = next;
-    setLobby(next);
-  }, []);
-  const setGameState = useCallback((next) => {
-    gameRef.current = next;
-    setGame(next);
-  }, []);
+  const setLobbyState = useCallback((next) => { lobbyRef.current = next; setLobby(next); }, []);
+  const setGameState = useCallback((next) => { gameRef.current = next; setGame(next); }, []);
 
-  // 모바일에서 카톡으로 코드를 보내러 나갔다 오면 브라우저가 연결을 끊거나 탭을 새로 고쳐요.
-  // 방 상태를 저장해 두고 돌아왔을 때 같은 방 코드로 다시 열어요.
+  // 새로 고침이나 앱 전환 뒤에도 같은 방으로 돌아올 수 있게 방 상태를 저장해요.
   useEffect(() => {
     if (!roomCode || !profileRef.current) return;
-    localStorage.setItem(SESSION_KEY, JSON.stringify({ isHost: isHostRef.current, roomCode, profile: profileRef.current, lobby, game, savedAt: Date.now() }));
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      isHost: isHostRef.current, roomCode, profile: profileRef.current, lobby, game,
+      keys: Object.fromEntries(keysRef.current), savedAt: Date.now(),
+    }));
   }, [roomCode, lobby, game]);
 
-  const broadcast = useCallback((payload) => {
-    guestConnectionsRef.current.forEach(({ connection }) => {
-      if (connection.open) connection.send(payload);
-    });
+  const closeLink = useCallback(() => {
+    generationRef.current += 1;
+    linkRef.current?.close();
+    linkRef.current = null;
   }, []);
+  useEffect(() => closeLink, [closeLink]);
+
+  // ---------- 방장 ----------
+  const sendTo = useCallback((id, message) => linkRef.current?.sendTo?.(id, { ...message, rev: revRef.current }), []);
+  const sendLobbyTo = useCallback((id) => sendTo(id, { type: "lobby", lobby: lobbyRef.current }), [sendTo]);
+  const sendGameTo = useCallback((id) => { if (gameRef.current) sendTo(id, { type: "game", game: viewFor(gameRef.current, id) }); }, [sendTo]);
+  const sendStateTo = useCallback((id) => { sendLobbyTo(id); sendGameTo(id); }, [sendGameTo, sendLobbyTo]);
+  const guestIds = () => (lobbyRef.current?.players || []).map((player) => player.id).filter((id) => id !== profileRef.current?.id);
 
   const publishLobby = useCallback((next) => {
+    revRef.current += 1;
     setLobbyState(next);
-    broadcast({ type: "lobby", lobby: next });
-  }, [broadcast, setLobbyState]);
+    guestIds().forEach(sendLobbyTo);
+  }, [sendLobbyTo, setLobbyState]);
 
   const publishGame = useCallback((next) => {
+    revRef.current += 1;
     setGameState(next);
-    broadcast({ type: "game", game: next });
-  }, [broadcast, setGameState]);
+    guestIds().forEach(sendGameTo);
+  }, [sendGameTo, setGameState]);
 
-  const runAction = useCallback((playerId, action, connection = null) => {
+  const runAction = useCallback((playerId, action, replyTo = null) => {
     try {
-      const next = applyAction(gameRef.current, playerId, action);
-      publishGame(next);
+      publishGame(applyAction(gameRef.current, playerId, action));
     } catch (actionError) {
       const message = actionError instanceof Error ? actionError.message : "행동을 처리하지 못했어요.";
-      if (connection?.open) connection.send({ type: "error", message });
+      if (replyTo) sendTo(replyTo, { type: "error", message });
       else setError(message);
     }
-  }, [publishGame]);
+  }, [publishGame, sendTo]);
 
-  const attachGuestConnection = useCallback((connection) => {
-    connection.on("data", (message) => {
-      if (!message || typeof message !== "object") return;
-      if (message.type === "join") {
-        const currentLobby = lobbyRef.current;
-        const profile = message.profile;
-        if (!currentLobby || !profile?.id) return;
-        if (currentLobby.status !== "waiting") {
-          // 게임 중 끊겼던 플레이어는 같은 자리로 다시 들어와요.
-          if (gameRef.current?.players.some((player) => player.id === profile.id)) {
-            guestConnectionsRef.current.set(profile.id, { connection, playerId: profile.id });
-            connection.send({ type: "lobby", lobby: currentLobby });
-            connection.send({ type: "game", game: gameRef.current });
-          } else connection.send({ type: "error", message: "이미 게임이 시작된 방이에요." });
-          return;
-        }
-        const existing = currentLobby.players.find((player) => player.id === profile.id);
-        if (!existing && currentLobby.players.length >= 4) {
-          connection.send({ type: "error", message: "방이 가득 찼어요." });
-          return;
-        }
-        const players = existing
-          ? currentLobby.players.map((player) => player.id === profile.id ? { ...profile, connected: true } : player)
-          : [...currentLobby.players, { ...profile, connected: true }];
-        guestConnectionsRef.current.set(profile.id, { connection, playerId: profile.id });
-        publishLobby({ ...currentLobby, players });
+  const onGuestMessage = useCallback((message) => {
+    if (!isHostRef.current || !message || typeof message !== "object") return;
+    const current = lobbyRef.current;
+    const id = message.from || message.profile?.id;
+    if (!current || !id || !message.key) return;
+    const known = current.players.some((player) => player.id === id);
+    const knownKey = keysRef.current.get(id);
+    if (knownKey && knownKey !== message.key) { sendTo(id, { type: "error", message: "이미 다른 기기가 쓰고 있는 자리예요." }); return; }
+    seenRef.current.set(id, Date.now());
+
+    if (message.type === "join") {
+      const profile = message.profile;
+      if (!profile?.name) return;
+      if (current.status !== "waiting") {
+        // 게임 중 끊겼던 플레이어는 같은 자리로 다시 들어와요.
+        if (known && knownKey === message.key) sendStateTo(id);
+        else sendTo(id, { type: "error", message: "이미 게임이 시작된 방이에요.", fatal: true });
+        return;
       }
-      if (message.type === "action") {
-        const record = [...guestConnectionsRef.current.values()].find((entry) => entry.connection === connection);
-        if (record) runAction(record.playerId, message.action, connection);
-      }
-    });
-    connection.on("close", () => {
-      const record = [...guestConnectionsRef.current.values()].find((entry) => entry.connection === connection);
-      if (!record) return;
-      guestConnectionsRef.current.delete(record.playerId);
-      if (lobbyRef.current?.status === "waiting") {
-        publishLobby({ ...lobbyRef.current, players: lobbyRef.current.players.filter((player) => player.id !== record.playerId) });
-      }
-    });
-  }, [publishLobby, runAction]);
+      if (!known && current.players.length >= 4) { sendTo(id, { type: "error", message: "방이 가득 찼어요.", fatal: true }); return; }
+      keysRef.current.set(id, message.key);
+      const clean = { ...publicProfile(profile), connected: true };
+      const players = known ? current.players.map((player) => (player.id === id ? clean : player)) : [...current.players, clean];
+      publishLobby({ ...current, players });
+      return;
+    }
+    if (!known) return;
+    if (message.type === "action") runAction(id, message.action, id);
+    else if (message.type === "sync") sendStateTo(id);
+    else if (message.type === "leave" && current.status === "waiting") {
+      keysRef.current.delete(id);
+      publishLobby({ ...current, players: current.players.filter((player) => player.id !== id) });
+    }
+  }, [publishLobby, runAction, sendStateTo, sendTo]);
 
-  const cleanup = useCallback(() => {
-    clearTimeout(retryRef.current);
-    clearTimeout(serverTimerRef.current);
-    peerRef.current?.destroy();
-    peerRef.current = null;
-    hostConnectionRef.current = null;
-    guestConnectionsRef.current.clear();
-    isHostRef.current = false;
-  }, []);
-
-  useEffect(() => cleanup, [cleanup]);
-
-  // 시그널링 서버와의 연결만 끊긴 경우(백그라운드 전환 등) 같은 ID로 다시 붙어요.
-  const reconnectSoon = useCallback((peer) => {
-    setTimeout(() => { if (peerRef.current === peer && !peer.destroyed && peer.disconnected) peer.reconnect(); }, 1000);
-  }, []);
-  useEffect(() => {
-    const onVisible = () => {
-      const peer = peerRef.current;
-      if (document.visibilityState === "visible" && peer && !peer.destroyed && peer.disconnected) peer.reconnect();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, []);
-
-  useEffect(() => {
-    if (!isHostRef.current || game?.status !== "playing" || !game.turnDeadline) return undefined;
-    const deadline = game.turnDeadline;
-    const timer = setTimeout(() => {
-      const current = gameRef.current;
-      if (!current || current.status !== "playing" || current.turnDeadline !== deadline) return;
-      const timedOutPlayer = current.players[current.turn];
-      try { publishGame(playTimedTurn(current, timedOutPlayer.id)); }
-      catch { /* 다음 동기화에서 다시 시도할 수 있도록 게임 상태를 유지해요. */ }
-    }, Math.max(0, deadline - Date.now()) + 30);
-    return () => clearTimeout(timer);
-  }, [game?.status, game?.turnDeadline, publishGame]);
-
-  const hostRoom = useCallback((profile, resume = null) => {
-    cleanup();
+  const hostRoom = useCallback(async (profile, resume = null) => {
+    closeLink();
+    const generation = generationRef.current;
     const code = resume?.roomCode || makeRoomCode();
     profileRef.current = profile;
     isHostRef.current = true;
-    if (resume) sessionRef.current = { isHost: true, code, profile };
+    joinedRef.current = false;
     if (resume) {
+      sessionRef.current = { isHost: true, code, profile };
+      keysRef.current = new Map(Object.entries(resume.keys || {}));
       setRoomCode(code);
       setLobbyState(resume.lobby);
       setGameState(resume.game);
@@ -217,58 +173,49 @@ function useMultiplayer() {
     }
     setConnectionState(resume ? "reconnecting" : "connecting");
     setConnectStatus("방을 만드는 중…");
-    const open = () => {
-      const peer = new Peer(peerIdFor(code), PEER_OPTIONS);
-      peerRef.current = peer;
-      clearTimeout(serverTimerRef.current);
-      serverTimerRef.current = setTimeout(() => {
-        if (peerRef.current !== peer || peer.open) return;
-        if (lobbyRef.current) { peer.destroy(); return; } // 이미 열린 방이면 잠시 뒤 자동으로 다시 열어요.
-        cleanup(); setError("방을 열지 못했어요. 인터넷 연결을 확인하고 다시 시도해주세요."); setConnectionState("error"); setConnectStatus("");
-      }, 12000);
-      peer.on("open", () => {
-        clearTimeout(serverTimerRef.current);
-        setConnectStatus("");
-        sessionRef.current = { isHost: true, code, profile };
-        if (!lobbyRef.current) {
-          setRoomCode(code);
-          setLobbyState({ roomCode: code, status: "waiting", hostId: profile.id, players: [{ ...profile, connected: true }] });
-          setMode("lobby");
-        }
-        setConnectionState("connected");
-        history.replaceState(null, "", `?room=${code}`);
+    revRef.current = Date.now();
+    try {
+      const link = await openHostLink({
+        code, startIndex: hostIndexRef.current, onMessage: onGuestMessage,
+        onChange: (ready) => { if (generationRef.current === generation) downSinceRef.current = ready ? 0 : (downSinceRef.current || Date.now()); },
       });
-      peer.on("connection", attachGuestConnection);
-      peer.on("disconnected", () => reconnectSoon(peer));
-      peer.on("error", (peerError) => {
-        if (peerRef.current !== peer) return;
-        // 이미 열린 방은 포기하지 않아요. 서버에 예전 ID가 남아 있는 동안(최대 1분쯤)에는
-        // 감시 타이머가 몇 초마다 방을 다시 열어봐요.
-        if (lobbyRef.current) { setConnectionState("reconnecting"); return; }
-        clearTimeout(serverTimerRef.current);
-        setError(peerError.type === "unavailable-id" && !lobbyRef.current ? "방 코드가 겹쳤어요. 다시 만들어주세요." : "방을 열지 못했어요. 잠시 후 다시 시도해주세요.");
-        setConnectionState("error");
-        setConnectStatus("");
-      });
-    };
-    open();
-  }, [attachGuestConnection, cleanup, reconnectSoon, setGameState, setLobbyState]);
+      if (generationRef.current !== generation) { link.close(); return; }
+      linkRef.current = link;
+      hostIndexRef.current = link.index;
+      downSinceRef.current = 0;
+      sessionRef.current = { isHost: true, code, profile };
+      if (!lobbyRef.current) {
+        setRoomCode(code);
+        setLobbyState({ roomCode: code, status: "waiting", hostId: profile.id, players: [{ ...publicProfile(profile), connected: true }] });
+        setMode("lobby");
+      }
+      setConnectionState("connected");
+      setConnectStatus("");
+      history.replaceState(null, "", `?room=${code}`);
+      link.beat({ type: "beat", rev: revRef.current });
+    } catch {
+      if (generationRef.current !== generation) return;
+      if (lobbyRef.current) { hostIndexRef.current += 1; return; } // 이미 열린 방은 감시 타이머가 다시 시도해요.
+      closeLink();
+      setError("방을 열지 못했어요. 인터넷 연결을 확인하고 다시 시도해주세요.");
+      setConnectionState("error");
+      setConnectStatus("");
+    }
+  }, [closeLink, onGuestMessage, setGameState, setLobbyState]);
 
+  // ---------- 친구 ----------
   const joinRoom = useCallback((profile, rawCode, resume = null) => {
-    cleanup();
+    closeLink();
+    const generation = generationRef.current;
     const code = rawCode.trim().toUpperCase();
     if (code.length !== 5) { setError("5자리 방 코드를 확인해주세요."); return; }
-    const peer = new Peer(PEER_OPTIONS);
-    peerRef.current = peer;
     profileRef.current = profile;
     isHostRef.current = false;
-    let joined = Boolean(resume);
-    let attempts = 0;
-    let failCurrent = null;
-    connectedRef.current = false;
+    joinedRef.current = Boolean(resume);
     lastSeenRef.current = Date.now();
-    if (resume) sessionRef.current = { isHost: false, code, profile };
+    guestRevRef.current = null;
     if (resume) {
+      sessionRef.current = { isHost: false, code, profile };
       setRoomCode(code);
       setLobbyState(resume.lobby);
       setGameState(resume.game);
@@ -277,74 +224,59 @@ function useMultiplayer() {
     setConnectionState(resume ? "reconnecting" : "connecting");
     setConnectStatus("연결 서버에 접속하는 중…");
 
-    const giveUp = (message) => {
-      if (peerRef.current !== peer) return;
-      if (joined) { peer.destroy(); return; } // 이미 들어온 방은 감시 타이머가 다시 연결해요.
-      cleanup();
-      setError(message);
-      setConnectionState("error");
-      setConnectStatus("");
-    };
-    // 처음 입장은 3번까지 시도하고, 한 번 들어온 방은 방장이 돌아올 때까지 2분쯤 기다려요.
-    const retry = (reason) => {
-      if (peerRef.current !== peer) return;
-      attempts += 1;
-      if (joined && peer.destroyed) return;
-      if (!joined && (peer.destroyed || attempts >= 3)) { giveUp(reason); return; }
-      if (joined) setConnectionState("reconnecting");
-      else setConnectStatus(`다시 시도하는 중… (${attempts + 1}/3)`);
-      retryRef.current = setTimeout(connect, 1500);
-    };
-    function connect() {
-      if (peerRef.current !== peer || peer.destroyed) return;
-      if (peer.disconnected) { peer.reconnect(); retry(MSG_SERVER); return; }
-      if (!joined) setConnectStatus(attempts ? `방장을 찾는 중… (${attempts + 1}/3)` : "방장을 찾는 중…");
-      const connection = peer.connect(peerIdFor(code), { reliable: true });
-      hostConnectionRef.current = connection;
-      let failed = false;
-      const fail = (reason) => {
-        if (failed || hostConnectionRef.current !== connection) return;
-        failed = true; clearTimeout(timeout); failCurrent = null; connectedRef.current = false;
-        connection.close();
-        retry(reason);
-      };
-      failCurrent = fail;
-      const timeout = setTimeout(() => { if (!connection.open) fail(MSG_TIMEOUT); }, CONNECT_TIMEOUT_MS);
-      connection.on("open", () => {
-        clearTimeout(timeout);
-        attempts = 0;
-        joined = true;
-        connectedRef.current = true;
+    const link = openGuestLink({
+      code, id: profile.id,
+      onMessage: (message) => {
+        if (generationRef.current !== generation || !message || typeof message !== "object") return;
         lastSeenRef.current = Date.now();
-        sessionRef.current = { isHost: false, code, profile };
-        connection.send({ type: "join", profile });
-        setRoomCode(code);
-        if (!gameRef.current) setMode("lobby");
-        setConnectionState("connected");
-        setConnectStatus("");
-        history.replaceState(null, "", `?room=${code}`);
-      });
-      connection.on("data", (message) => {
-        lastSeenRef.current = Date.now();
-        if (message.type === "lobby") setLobbyState(message.lobby);
-        if (message.type === "game") { setGameState(message.game); setMode("game"); }
+        if (message.type === "beat") {
+          if (joinedRef.current) { setConnectionState("connected"); if (message.rev !== guestRevRef.current) sendUp({ type: "sync" }); }
+          return;
+        }
         if (message.type === "error") {
           setError(message.message);
-          // 가득 찼거나 이미 시작된 방은 다시 시도해도 소용없어요.
-          if (!joined || !gameRef.current) { sessionRef.current = null; cleanup(); setConnectionState("error"); setConnectStatus(""); if (!gameRef.current) setMode("landing"); }
+          if (message.fatal) { sessionRef.current = null; closeLink(); setConnectionState("error"); setConnectStatus(""); if (!gameRef.current) setMode("landing"); }
+          return;
         }
-      });
-      connection.on("close", () => fail(MSG_TIMEOUT));
-    }
-    serverTimerRef.current = setTimeout(() => { if (!peer.open) giveUp(MSG_SERVER); }, 12000);
-    peer.on("open", () => { clearTimeout(serverTimerRef.current); connect(); });
-    peer.on("disconnected", () => reconnectSoon(peer));
-    peer.on("error", (peerError) => {
-      if (peerRef.current !== peer) return;
-      if (peerError.type === "peer-unavailable") { failCurrent?.(MSG_NOTFOUND); return; }
-      if (!joined) giveUp(MSG_SERVER);
+        if (message.type !== "lobby" && message.type !== "game") return;
+        guestRevRef.current = message.rev;
+        if (!joinedRef.current || sessionRef.current?.code !== code) {
+          joinedRef.current = true;
+          sessionRef.current = { isHost: false, code, profile };
+          setRoomCode(code);
+          history.replaceState(null, "", `?room=${code}`);
+        }
+        if (message.type === "lobby") setLobbyState(message.lobby);
+        if (message.type === "game") { setGameState(message.game); setMode("game"); } else if (!gameRef.current) setMode("lobby");
+        setConnectionState("connected");
+        setConnectStatus("");
+      },
+      onChange: (connected) => {
+        if (generationRef.current !== generation) return;
+        if (connected) { downSinceRef.current = 0; sendUp({ type: "join", profile: publicProfile(profile) }); } else downSinceRef.current ||= Date.now();
+      },
     });
-  }, [cleanup, reconnectSoon, setGameState, setLobbyState]);
+    linkRef.current = link;
+    function sendUp(message) { return link.publish({ ...message, from: profile.id, key: profile.key }); }
+    linkRef.current.sendUp = sendUp;
+
+    // 처음 입장은 방장의 응답을 기다리다가 3번 두드려보고 안 되면 알려줘요.
+    if (!resume) {
+      let tries = 0;
+      const knock = () => {
+        if (generationRef.current !== generation || joinedRef.current) return;
+        tries += 1;
+        if (tries > 4) {
+          closeLink(); setError(link.connected() ? MSG_NOTFOUND : MSG_SERVER); setConnectionState("error"); setConnectStatus("");
+          return;
+        }
+        setConnectStatus(!link.connected() ? "연결 서버에 접속하는 중…" : tries > 1 ? `방장을 찾는 중… (${tries}/4)` : "방장을 찾는 중…");
+        if (link.connected()) sendUp({ type: "join", profile: publicProfile(profile) });
+        setTimeout(knock, 3500);
+      };
+      setTimeout(knock, 1500);
+    }
+  }, [closeLink, setGameState, setLobbyState]);
 
   const resumeSaved = useCallback(() => {
     const session = loadSession();
@@ -356,42 +288,51 @@ function useMultiplayer() {
   useEffect(() => {
     const session = loadSession();
     const params = new URLSearchParams(location.search);
-    if (!session || params.get("demo") || params.get("room")?.toUpperCase() !== session.roomCode) return;
-    if (session.isHost) hostRoom(session.profile, session);
-    else joinRoom(session.profile, session.roomCode, session);
+    if (!session || params.has("demo") || params.get("room")?.toUpperCase() !== session.roomCode) return;
+    resumeSaved();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 감시 타이머: 폰이 잠들거나 와이파이↔데이터로 바뀌어 연결이 끊겨도, 나가기 전까지는 스스로 복구해요.
+  // ---------- 감시 타이머 ----------
   const rebuild = useCallback((force = false) => {
     const session = sessionRef.current;
     if (!session || !lobbyRef.current) return;
     const now = Date.now();
     if (!force && now - lastRebuildRef.current < 6000) return;
     lastRebuildRef.current = now;
-    const resume = { roomCode: session.code, lobby: lobbyRef.current, game: gameRef.current };
-    if (session.isHost) hostRoom(session.profile, resume); else joinRoom(session.profile, session.code, resume);
+    downSinceRef.current = 0;
+    if (session.isHost) { hostIndexRef.current += 1; hostRoom(session.profile, { roomCode: session.code, lobby: lobbyRef.current, game: gameRef.current, keys: Object.fromEntries(keysRef.current) }); }
+    else joinRoom(session.profile, session.code, { lobby: lobbyRef.current, game: gameRef.current });
   }, [hostRoom, joinRoom]);
 
   useEffect(() => {
     const tick = () => {
       const session = sessionRef.current;
+      const link = linkRef.current;
       if (!session) return;
-      const peer = peerRef.current;
-      if (!peer || peer.destroyed) { rebuild(); return; }
-      if (peer.disconnected) {
-        disconnectedSinceRef.current ||= Date.now();
-        try { peer.reconnect(); } catch { /* 다음 틱에 다시 시도해요. */ }
-        if (Date.now() - disconnectedSinceRef.current > 15000) { disconnectedSinceRef.current = 0; rebuild(); }
+      if (!link) { rebuild(); return; }
+      // 서버와 12초 넘게 끊겨 있으면 (방장은 다른 서버로) 연결을 새로 만들어요.
+      if (!link.connected() && downSinceRef.current && Date.now() - downSinceRef.current > 12000) { rebuild(true); return; }
+      if (session.isHost) {
+        link.beat({ type: "beat", rev: revRef.current });
+        const current = lobbyRef.current;
+        // 대기실에서 신호가 25초 넘게 없는 친구는 자리를 비워줘요.
+        if (current?.status === "waiting") {
+          const gone = current.players.filter((player) => player.id !== profileRef.current?.id && Date.now() - (seenRef.current.get(player.id) || 0) > 25000);
+          if (gone.length) publishLobby({ ...current, players: current.players.filter((player) => !gone.includes(player)) });
+        }
         return;
       }
-      disconnectedSinceRef.current = 0;
-      if (session.isHost) { broadcast({ type: "ping" }); return; }
-      // 방장이 몇 초마다 보내는 신호가 12초 넘게 안 오면 연결이 죽은 걸로 보고 새로 이어요.
-      if (connectedRef.current && (!hostConnectionRef.current?.open || Date.now() - lastSeenRef.current > 12000)) { connectedRef.current = false; rebuild(true); }
+      if (!link.connected()) return;
+      link.sendUp?.({ type: joinedRef.current ? "hb" : "join", profile: publicProfile(profileRef.current) });
+      // 방장 신호가 12초 넘게 없으면 끊긴 걸로 보고 알려요. 신호가 다시 오면 알아서 돌아와요.
+      if (joinedRef.current && Date.now() - lastSeenRef.current > HOST_SILENT_MS) {
+        setConnectionState("reconnecting");
+        link.sendUp({ type: "join", profile: publicProfile(profileRef.current) });
+      }
     };
     tickRef.current = tick;
-    const interval = setInterval(tick, 4000);
+    const interval = setInterval(tick, BEAT_MS);
     const wake = () => { if (document.visibilityState !== "hidden") tick(); };
     document.addEventListener("visibilitychange", wake);
     window.addEventListener("online", tick);
@@ -402,7 +343,20 @@ function useMultiplayer() {
       window.removeEventListener("online", tick);
       window.removeEventListener("pageshow", tick);
     };
-  }, [broadcast, rebuild]);
+  }, [publishLobby, rebuild]);
+
+  // 방장 타이머: 30초 안에 행동이 없으면 자동 진행해요.
+  useEffect(() => {
+    if (!isHostRef.current || game?.status !== "playing" || !game.turnDeadline) return undefined;
+    const deadline = game.turnDeadline;
+    const timer = setTimeout(() => {
+      const current = gameRef.current;
+      if (!current || current.status !== "playing" || current.turnDeadline !== deadline) return;
+      try { publishGame(playTimedTurn(current, current.players[current.turn].id)); }
+      catch { /* 다음 동기화에서 다시 시도할 수 있도록 게임 상태를 유지해요. */ }
+    }, Math.max(0, deadline - Date.now()) + 30);
+    return () => clearTimeout(timer);
+  }, [game?.status, game?.turnDeadline, publishGame]);
 
   const retryNow = useCallback(() => rebuild(true), [rebuild]);
 
@@ -410,8 +364,7 @@ function useMultiplayer() {
     if (!isHostRef.current || lobbyRef.current.players.length < 2) return;
     const nextLobby = { ...lobbyRef.current, status: "playing" };
     publishLobby(nextLobby);
-    const nextGame = createGame(nextLobby.players, nextLobby.roomCode);
-    publishGame(nextGame);
+    publishGame(createGame(nextLobby.players, nextLobby.roomCode));
     setMode("game");
   }, [publishGame, publishLobby]);
 
@@ -419,14 +372,13 @@ function useMultiplayer() {
     const playerId = profileRef.current?.id;
     if (!playerId) return;
     if (isHostRef.current) runAction(playerId, action);
-    else if (hostConnectionRef.current?.open) hostConnectionRef.current.send({ type: "action", action });
-    else setError("다시 연결하는 중이에요. 잠시 후 눌러주세요.");
+    else if (!linkRef.current?.sendUp?.({ type: "action", action })) setError("다시 연결하는 중이에요. 잠시 후 눌러주세요.");
   }, [runAction]);
 
   const leave = useCallback(() => {
+    if (!isHostRef.current) linkRef.current?.sendUp?.({ type: "leave" });
     sessionRef.current = null;
-    connectedRef.current = false;
-    cleanup();
+    closeLink();
     localStorage.removeItem(SESSION_KEY);
     setMode("landing");
     setLobbyState(null);
@@ -434,8 +386,9 @@ function useMultiplayer() {
     setRoomCode("");
     setError("");
     setConnectionState("idle");
+    setConnectStatus("");
     history.replaceState(null, "", location.pathname);
-  }, [cleanup, setGameState, setLobbyState]);
+  }, [closeLink, setGameState, setLobbyState]);
 
   return {
     mode, roomCode, lobby, game, error, setError, connectionState, connectStatus,
@@ -483,7 +436,9 @@ function Landing({ onHost, onJoin, onResume, onSolo, onTutorial, onCancel, conne
     localStorage.setItem("gemfriends-avatar", avatar);
     const savedId = localStorage.getItem("gemfriends-id") || makeId();
     localStorage.setItem("gemfriends-id", savedId);
-    return { id: savedId, name: cleanName, avatar };
+    const savedKey = localStorage.getItem("gemfriends-key") || makeId(); // 내 자리를 다른 사람이 쓰지 못하게 하는 본인 확인용 값
+    localStorage.setItem("gemfriends-key", savedKey);
+    return { id: savedId, name: cleanName, avatar, key: savedKey };
   };
 
   return (

@@ -443,3 +443,16 @@ export function applyAction(game, playerId, action) {
     default: throw new Error("알 수 없는 행동이에요.");
   }
 }
+
+// 플레이어마다 볼 수 있는 정보만 담아 보내요(실제 보드게임처럼).
+// 더미 카드 내용과 남이 더미에서 예약한 카드는 숨기고, 장수만 남겨요.
+export function viewFor(game, playerId) {
+  return {
+    ...game,
+    decks: Object.fromEntries(Object.entries(game.decks).map(([tier, deck]) => [tier, deck.map(() => null)])),
+    players: game.players.map((player) => (player.id === playerId ? player : {
+      ...player,
+      reserved: player.reserved.map((card) => (card.secret ? { id: card.id, tier: card.tier, secret: true } : card)),
+    })),
+  };
+}

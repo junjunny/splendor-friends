@@ -6,6 +6,7 @@ import {
   applyAction,
   createDeck,
   createGame,
+  viewFor,
   paymentFor,
   playerBonuses,
   tokenTotal,
@@ -125,4 +126,16 @@ test("더미에서 예약한 카드만 비공개로 표시된다", () => {
   game = applyAction(game, "p1", { type: "reserve", source: "1", cardId: game.board[1][0].id });
   assert.equal(game.players[0].reserved[0].secret, true);
   assert.equal(game.players[1].reserved[0].secret, undefined);
+});
+
+test("플레이어별 화면은 더미 내용과 남이 더미에서 예약한 카드를 숨긴다", () => {
+  let game = createGame(players(2), "VIEW");
+  game = applyAction(game, "p0", { type: "reserve", source: "3" });
+  const mine = viewFor(game, "p0");
+  const theirs = viewFor(game, "p1");
+  assert.equal(mine.players[0].reserved[0].cost !== undefined, true);
+  assert.deepEqual(Object.keys(theirs.players[0].reserved[0]).sort(), ["id", "secret", "tier"]);
+  assert.equal(theirs.decks[3].length, game.decks[3].length);
+  assert.ok(theirs.decks[3].every((card) => card === null));
+  assert.ok(JSON.stringify(theirs).length < JSON.stringify(game).length / 2);
 });
