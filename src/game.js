@@ -10,6 +10,15 @@ export const COLOR_META = {
   gold: { label: "골드 조커", short: "골", icon: "★", shape: "star", hex: "#f2b705" },
 };
 
+// 먼작귀 세계관 안의 캐릭터/풍경만 사용해 카드 아트를 구성해요.
+// 오데는 장면별 변주를 많이 넣어 2·3단계 카드에서 자주 만날 수 있게 했어요.
+export const CHARACTER_ART = [
+  "chiikawa", "hachiware", "usagi", "momonga", "ode", "ode-market", "ode-picnic", "ode-night",
+  "kurimanju", "rakko", "shisa-furuhonya", "kani", "pochette-armor", "ramen-armor", "labor-armor",
+  "master-armor", "pajama-party", "seiren", "old-lady",
+];
+export const BACKGROUND_ART = ["bg-meadow", "bg-cave", "bg-ramen"];
+
 const COST_PATTERNS = {
   1: [
     [0, 1, 1, 1, 1], [0, 2, 0, 2, 0], [0, 0, 2, 1, 2], [0, 3, 0, 0, 0],
@@ -149,20 +158,19 @@ function shuffle(items, random) {
 }
 
 export function createDeck(tier, seed = "gem-friends") {
-  const characterArt = ["chiikawa", "hachiware", "usagi", "momonga", "ode", "kurimanju", "rakko", "shisa-furuhonya"];
-  const backgroundArt = ["bg-meadow", "bg-cave", "bg-ramen"];
   const cards = OFFICIAL_CARD_ROWS
     .map((row, index) => ({ row, index }))
     .filter(({ row }) => row[0] === tier)
     .map(({ row, index }) => {
       const [cardTier, bonus, points, ...costs] = row;
-      const useBackground = cardTier === 1 && points === 0 && index % 3 !== 0;
+      const useBackground = cardTier === 1;
       return {
         id: `card-${index}`,
         tier: cardTier,
         bonus,
         points,
-        art: useBackground ? backgroundArt[index % backgroundArt.length] : characterArt[index % characterArt.length],
+        art: useBackground ? BACKGROUND_ART[index % BACKGROUND_ART.length] : CHARACTER_ART[index % CHARACTER_ART.length],
+        artVariant: index,
         artType: useBackground ? "background" : "character",
         cost: Object.fromEntries(COLORS.map((color, colorIndex) => [color, costs[colorIndex]])),
       };
@@ -274,6 +282,10 @@ function addLog(game, message) {
   game.log = [message, ...game.log].slice(0, 16);
 }
 
+function describeColors(colors) {
+  return colors.map((color) => COLOR_META[color]?.short || color).join(" · ");
+}
+
 function finishTurn(game, player) {
   const nobles = eligibleNobles(game, player);
   if (nobles.length === 1) {
@@ -335,7 +347,7 @@ export function takeTokens(gameInput, playerId, colors) {
     throw new Error("서로 다른 색 최대 3개 또는 같은 색 2개를 골라주세요.");
   }
   colors.forEach((color) => { game.supply[color] -= 1; player.tokens[color] += 1; });
-  addLog(game, `${player.name}님이 보석 ${colors.length}개를 가져갔어요.`);
+  addLog(game, `${player.name}님이 ${describeColors(colors)} 보석을 가져갔어요.`);
   return afterAction(game, player);
 }
 
@@ -359,7 +371,7 @@ export function buyCard(gameInput, playerId, source, cardId) {
   ALL_TOKENS.forEach((color) => { player.tokens[color] -= payment[color]; game.supply[color] += payment[color]; });
   found.remove();
   player.cards.push(found.card);
-  addLog(game, `${player.name}님이 ${found.card.tier}단계 카드를 구매했어요.${found.card.points ? ` +${found.card.points}점` : ""}`);
+  addLog(game, `${player.name}님이 ${found.card.tier}단계 ${COLOR_META[found.card.bonus].short} 카드 구매 · 보너스 ${COLOR_META[found.card.bonus].short}${found.card.points ? ` · +${found.card.points}점` : ""}`);
   return finishTurn(game, player);
 }
 
@@ -379,8 +391,9 @@ export function reserveCard(gameInput, playerId, source, cardId = null) {
     if (!card) throw new Error("카드 더미가 비었어요.");
   }
   player.reserved.push(card);
-  if (game.supply.gold > 0) { game.supply.gold -= 1; player.tokens.gold += 1; }
-  addLog(game, `${player.name}님이 ${tier}단계 카드를 예약했어요.${player.tokens.gold ? " 골드도 받았어요!" : ""}`);
+  const receivedGold = game.supply.gold > 0;
+  if (receivedGold) { game.supply.gold -= 1; player.tokens.gold += 1; }
+  addLog(game, `${player.name}님이 ${tier}단계 카드를 예약했어요.${receivedGold ? " 골드 조커 +1" : ""}`);
   return afterAction(game, player);
 }
 

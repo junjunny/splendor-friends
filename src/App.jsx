@@ -370,10 +370,19 @@ function MiniGem({ color, count }) {
 
 function DevelopmentCard({ card, canAct, onBuy, onReserve, source }) {
   const affordable = canAct && Boolean(onBuy);
+  const artVariant = (card.artVariant ?? 0) % 12;
+  const artIndex = card.artVariant ?? 0;
+  const artStyle = {
+    "--art-x": `${18 + ((artIndex * 17) % 68)}%`,
+    "--art-y": `${30 + ((artIndex * 11) % 45)}%`,
+    "--art-scale": `${1.02 + ((artIndex * 7) % 18) / 100}`,
+    "--art-rotate": `${(artIndex % 7) - 3}deg`,
+    "--art-hue": `${(artIndex * 13) % 32}deg`,
+  };
   return (
     <article className={`dev-card bonus-${card.bonus}`} style={{ "--bonus-color": COLOR_META[card.bonus].hex }}>
       <div className="card-top"><strong>{card.points || ""}</strong><span className={`card-bonus mini-shape-${COLOR_META[card.bonus].shape}`} title={`${COLOR_META[card.bonus].label} 영구 할인`}>{COLOR_META[card.bonus].short}</span></div>
-      <div className={`card-art card-art-${card.artType}`}><img src={`/assets/cards/${card.art}.png`} alt="먼작귀 팬아트 카드" loading="lazy" /><i>LEVEL {card.tier}</i></div>
+      <div className={`card-art card-art-${card.artType} card-art-v-${artVariant}`} style={artStyle}><img src={`/assets/cards/${card.art}.png`} alt="먼작귀 팬아트 카드" loading="lazy" /><i>LEVEL {card.tier} · #{(card.artVariant ?? 0) + 1}</i></div>
       <div className="cost-list">
         {COLORS.filter((color) => card.cost[color] > 0).map((color) => <MiniGem key={color} color={color} count={card.cost[color]} />)}
       </div>
@@ -393,11 +402,19 @@ function NobleCard({ noble, selectable, onClick }) {
 
 function PlayerPanel({ player, active, me, canAct, onBuyReserved }) {
   const bonuses = playerBonuses(player);
+  const ownedTokens = ALL_TOKENS.filter((color) => player.tokens[color] > 0);
+  const ownedBonuses = COLORS.filter((color) => bonuses[color] > 0);
   return (
     <section className={`player-panel ${active ? "active" : ""} ${me ? "me" : ""}`}>
-      <div className="player-head"><Avatar avatar={player.avatar} /><div><strong>{player.name}{me ? " · 나" : ""}{player.isBot && <em>{BOT_LEVELS[player.difficulty]?.label || "BOT"}</em>}</strong><span>{playerScore(player)}점 · 카드 {player.cards.length}장</span></div>{active && <i>차례</i>}</div>
+      <div className="player-head"><Avatar avatar={player.avatar} /><div><strong>{player.name}{me ? " · 나" : ""}{player.isBot && <em>{BOT_LEVELS[player.difficulty]?.label || "BOT"}</em>}</strong><span className="score-line"><b>{playerScore(player)}점</b> · 카드 {player.cards.length}장 · 귀족 {player.nobles.length}</span></div>{active && <i>차례</i>}</div>
       <div className="bonus-row">{COLORS.map((color) => <span key={color} className={`bonus-chip bonus-${color} mini-shape-${COLOR_META[color].shape}`}><i>{COLOR_META[color].short}</i><b>{bonuses[color]}</b><small>+{player.tokens[color]}</small></span>)}<span className="bonus-chip bonus-gold mini-shape-star"><i>골</i><b>{player.tokens.gold}</b></span></div>
       <div className="player-meta"><span>토큰 {tokenTotal(player)}/10</span><span>예약 {player.reserved.length}/3</span><span>귀족 {player.nobles.length}</span></div>
+      <details className="player-details" open={me}>
+        <summary>{me ? "내 보유 상태" : "상대 보유 상태"}</summary>
+        <div className="inventory-row"><span>보석</span><div className="inventory-items">{ownedTokens.length ? ownedTokens.map((color) => <MiniGem key={color} color={color} count={player.tokens[color]} />) : <small>없음</small>}</div></div>
+        <div className="inventory-row"><span>개발</span><div className="inventory-items">{ownedBonuses.length ? ownedBonuses.map((color) => <span className={`card-owned-chip bonus-${color}`} key={color}><i>{COLOR_META[color].short}</i><b>{bonuses[color]}장</b></span>) : <small>없음</small>}</div></div>
+        <div className="inventory-row"><span>예약</span><b>{player.reserved.length}장</b></div>
+      </details>
       {me && player.reserved.length > 0 && <details className="reserved-list"><summary>내 예약 카드 보기</summary><div>{player.reserved.map((card) => <DevelopmentCard key={card.id} card={card} source="reserved" canAct={canAct} onBuy={paymentFor(player, card) ? () => onBuyReserved(card) : null} />)}</div></details>}
     </section>
   );
@@ -444,13 +461,21 @@ function GameBoard({ game, me, roomCode, onAction, onLeave }) {
       </header>
       <div className="game-layout">
         <div className="board-area">
-          <section className="supply-section panel-card">
-            <div className="section-title"><div><span>공급처</span><small>{canMainAction ? "보석을 눌러 골라주세요" : "공용 보석"}</small></div>{selectedTokens.length > 0 && <button className="clear-pick" onClick={() => setSelectedTokens([])}>선택 취소</button>}</div>
-            <div className="token-row">{ALL_TOKENS.map((color) => <Token key={color} color={color} count={game.supply[color]} selected={selectedTokens.filter((item) => item === color).length} onClick={color !== "gold" && canMainAction ? () => selectToken(color) : null} />)}</div>
-            {selectedTokens.length > 0 && <button className="take-confirm" disabled={!validSelection} onClick={() => act({ type: "take", colors: selectedTokens })}><Gem size={18} /> {validSelection ? `${selectedTokens.length}개 가져가기` : "서로 다른 3개 또는 같은 2개"}</button>}
-          </section>
+          <div className="board-top-row">
+            <section className="supply-section panel-card">
+              <div className="section-title"><div><span>공급처</span><small>{canMainAction ? "보석을 눌러 골라주세요" : "공용 보석"}</small></div>{selectedTokens.length > 0 && <button className="clear-pick" onClick={() => setSelectedTokens([])}>선택 취소</button>}</div>
+              <div className="token-row">{ALL_TOKENS.map((color) => <Token key={color} color={color} count={game.supply[color]} selected={selectedTokens.filter((item) => item === color).length} onClick={color !== "gold" && canMainAction ? () => selectToken(color) : null} />)}</div>
+              {selectedTokens.length > 0 && <button className="take-confirm" disabled={!validSelection} onClick={() => act({ type: "take", colors: selectedTokens })}><Gem size={18} /> {validSelection ? `${selectedTokens.length}개 가져가기` : "서로 다른 3개 또는 같은 2개"}</button>}
+            </section>
 
-          <section className="nobles-section panel-card"><div className="section-title"><div><span>귀족 광장</span><small>조건을 채우면 3점</small></div></div><div className="nobles-row">{game.nobles.map((noble) => <NobleCard key={noble.id} noble={noble} />)}</div></section>
+            <section className="nobles-section panel-card"><div className="section-title"><div><span>귀족 광장</span><small>조건을 채우면 3점</small></div></div><div className="nobles-row">{game.nobles.map((noble) => <NobleCard key={noble.id} noble={noble} />)}</div></section>
+          </div>
+
+          <section className="activity-feed panel-card">
+            <div className="section-title"><div><span>실시간 플레이</span><small>상대의 점수와 최근 행동</small></div><b className="activity-live">LIVE</b></div>
+            <div className="score-strip">{game.players.map((item) => <span key={item.id} className={item.id === me?.id ? "is-me" : ""}><Avatar avatar={item.avatar} size="sm" /><b>{item.name}</b><strong>{playerScore(item)}점</strong></span>)}</div>
+            <div className="activity-list">{game.log.slice(0, 4).map((item, index) => <p key={`${item}-${index}`}><i>{index === 0 ? "방금" : `${index}턴 전`}</i>{item}</p>)}</div>
+          </section>
 
           <section className="market panel-card">
             {[3, 2, 1].map((tier) => <div className="market-row" key={tier}>
