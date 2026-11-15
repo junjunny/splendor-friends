@@ -374,19 +374,10 @@ function MiniGem({ color, count }) {
 
 function DevelopmentCard({ card, canAct, onBuy, onReserve, source }) {
   const affordable = canAct && Boolean(onBuy);
-  const artVariant = (card.artVariant ?? 0) % 12;
-  const artIndex = card.artVariant ?? 0;
-  const artStyle = {
-    "--art-x": `${18 + ((artIndex * 17) % 68)}%`,
-    "--art-y": `${30 + ((artIndex * 11) % 45)}%`,
-    "--art-scale": `${1.02 + ((artIndex * 7) % 18) / 100}`,
-    "--art-rotate": `${(artIndex % 7) - 3}deg`,
-    "--art-hue": `${(artIndex * 13) % 32}deg`,
-  };
   return (
     <article className={`dev-card bonus-${card.bonus}`} style={{ "--bonus-color": COLOR_META[card.bonus].hex }}>
       <div className="card-top"><strong>{card.points || ""}</strong><span className={`card-bonus mini-shape-${COLOR_META[card.bonus].shape}`} title={`${COLOR_META[card.bonus].label} 영구 할인`}>{COLOR_META[card.bonus].short}</span></div>
-      <div className={`card-art card-art-${card.artType} card-art-v-${artVariant}`} style={artStyle}><img src={`/assets/cards/${card.art}`} alt="먼작귀 팬아트 카드" loading="lazy" /></div>
+      <div className={`card-art card-art-${card.artType}`}><img src={`/assets/cards/${card.art}`} alt="먼작귀 팬아트 카드" loading="lazy" /></div>
       <div className="cost-list">
         {COLORS.filter((color) => card.cost[color] > 0).map((color) => <MiniGem key={color} color={color} count={card.cost[color]} />)}
       </div>
