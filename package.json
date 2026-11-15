@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "test": "node --test",
+    "audit:art": "node scripts/audit-card-art.mjs",
+    "test:e2e": "playwright test",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -18,5 +20,8 @@
     "lucide-react": "latest",
     "peerjs": "latest"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@axe-core/playwright": "latest",
+    "@playwright/test": "latest"
+  }
 }

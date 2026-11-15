@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Peer from "peerjs";
-import { Bot, Check, ChevronRight, Clock3, Copy, Crown, Gem, HelpCircle, LockKeyhole, LogOut, Play, RotateCcw, Share2, Sparkles, Users, X } from "lucide-react";
+import { BookOpenCheck, Bot, Check, ChevronRight, Clock3, Copy, Crown, Gem, HelpCircle, LockKeyhole, LogOut, Play, RotateCcw, Share2, Sparkles, Users, X } from "lucide-react";
 import {
   ALL_TOKENS,
   COLORS,
@@ -14,6 +14,7 @@ import {
   tokenTotal,
 } from "./game.js";
 import { BOT_LEVELS, chooseBotAction, playTimedTurn } from "./bot.js";
+import TutorialDialog from "./Tutorial.jsx";
 
 const AVATARS = {
   chiikawa: { label: "치이카와", image: "/assets/cards/chiikawa.png", color: "#ffe2e9" },
@@ -235,7 +236,7 @@ function Avatar({ avatar, size = "md" }) {
   return <span className={`avatar avatar-${size}`} style={{ "--avatar-bg": item.color }} aria-label={item.label}><img src={item.image} alt="" /></span>;
 }
 
-function Landing({ onHost, onJoin, onSolo, connecting }) {
+function Landing({ onHost, onJoin, onSolo, onTutorial, connecting }) {
   const initialRoom = new URLSearchParams(location.search).get("room")?.toUpperCase() || "";
   const [name, setName] = useState(localStorage.getItem("gemfriends-name") || "");
   const savedAvatar = localStorage.getItem("gemfriends-avatar");
@@ -257,13 +258,17 @@ function Landing({ onHost, onJoin, onSolo, connecting }) {
     <main className="landing">
       <nav className="landing-nav">
         <a className="brand" href="#top"><span className="brand-gem">◆</span><span>보석친구</span></a>
-        <button className="text-button" onClick={() => document.getElementById("rules")?.showModal()}><HelpCircle size={18} /> 규칙 보기</button>
+        <div className="landing-nav-actions"><button className="tutorial-nav-button" onClick={onTutorial}><BookOpenCheck size={17} /> 튜토리얼</button><button className="text-button" onClick={() => document.getElementById("rules")?.showModal()}><HelpCircle size={18} /> 규칙 요약</button></div>
       </nav>
       <section className="hero" id="top">
         <div className="hero-copy">
           <div className="eyebrow"><Sparkles size={15} /> 혼자 또는 2–4인 온라인 보드게임</div>
           <h1>반짝이는 보석,<br /><em>친구와 한 판!</em></h1>
           <p>방 코드 하나로 모여 보석을 모으고, 카드를 사고, 귀족의 마음을 사로잡아 보세요.</p>
+          <button className="tutorial-invite" type="button" onClick={onTutorial}>
+            <img src="/assets/cards/hachiware.png" alt="" />
+            <span><b>스플렌더가 처음인가요?</b><small>2·3·4인 규칙을 8단계로 연습해요</small></span><ChevronRight />
+          </button>
           <div className="profile-card glass-card">
             <label>플레이어 이름<input value={name} onChange={(event) => setName(event.target.value)} placeholder="이름을 적어주세요" maxLength={10} /></label>
             <fieldset>
@@ -301,6 +306,7 @@ function Landing({ onHost, onJoin, onSolo, connecting }) {
         <div className="hero-art" role="img" aria-label="치이카와 친구들이 보석 게임을 즐기는 팬아트" />
       </section>
       <section className="feature-strip">
+        <button type="button" onClick={onTutorial}><BookOpenCheck /><strong>튜토리얼</strong><span>처음부터 차근차근</span></button>
         <div><Bot /><strong>1인 봇 대전</strong><span>4단계 난이도 선택</span></div>
         <div><Share2 /><strong>방 코드</strong><span>설치 없이 바로 초대</span></div>
         <div><LockKeyhole /><strong>방장 진행</strong><span>턴과 규칙 자동 판정</span></div>
@@ -327,7 +333,7 @@ function RulesDialog() {
   );
 }
 
-function Lobby({ lobby, me, isHost, onStart, onLeave }) {
+function Lobby({ lobby, me, isHost, onStart, onLeave, onTutorial }) {
   const [copied, setCopied] = useState(false);
   const shareUrl = `${location.origin}${location.pathname}?room=${lobby?.roomCode || ""}`;
   const copyInvite = async () => {
@@ -351,7 +357,7 @@ function Lobby({ lobby, me, isHost, onStart, onLeave }) {
           })}
         </div>
         {isHost ? <button className="primary-button start-button" disabled={!lobby || lobby.players.length < 2} onClick={onStart}><Play size={20} fill="currentColor" /> {lobby?.players.length < 2 ? "친구 한 명만 더!" : `${lobby.players.length}명으로 시작하기`}</button> : <div className="waiting-pill"><span /> 방장이 곧 시작해요</div>}
-        <button className="text-button leave-button" onClick={onLeave}><LogOut size={17} /> 방 나가기</button>
+        <div className="lobby-secondary-actions"><button className="text-button" onClick={onTutorial}><BookOpenCheck size={17} /> 시작 전 튜토리얼</button><button className="text-button leave-button" onClick={onLeave}><LogOut size={17} /> 방 나가기</button></div>
       </div>
     </main>
   );
@@ -375,9 +381,9 @@ function MiniGem({ color, count }) {
 function DevelopmentCard({ card, canAct, onBuy, onReserve, source }) {
   const affordable = canAct && Boolean(onBuy);
   return (
-    <article className={`dev-card bonus-${card.bonus}`} style={{ "--bonus-color": COLOR_META[card.bonus].hex }}>
+    <article className={`dev-card bonus-${card.bonus} ${canAct ? "is-actionable" : ""}`} style={{ "--bonus-color": COLOR_META[card.bonus].hex }}>
       <div className="card-top"><strong>{card.points || ""}</strong><span className={`card-bonus mini-shape-${COLOR_META[card.bonus].shape}`} title={`${COLOR_META[card.bonus].label} 영구 할인`}>{COLOR_META[card.bonus].short}</span></div>
-      <div className={`card-art card-art-${card.artType}`}><img src={`/assets/cards/${card.art}`} alt="먼작귀 팬아트 카드" loading="lazy" /></div>
+      <div className={`card-art card-art-${card.artType}`}><img src={`/assets/cards/${card.art}`} alt={`먼작귀 ${card.tier}단계 카드 일러스트 ${card.artVariant + 1}`} loading={source === "reserved" ? "lazy" : "eager"} /></div>
       <div className="cost-list">
         {COLORS.filter((color) => card.cost[color] > 0).map((color) => <MiniGem key={color} color={color} count={card.cost[color]} />)}
       </div>
@@ -415,7 +421,7 @@ function PlayerPanel({ player, active, me, canAct, onBuyReserved }) {
   );
 }
 
-function GameBoard({ game, me, roomCode, onAction, onLeave }) {
+function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial }) {
   const [selectedTokens, setSelectedTokens] = useState([]);
   const [notice, setNotice] = useState("");
   const [mobilePanel, setMobilePanel] = useState(false);
@@ -451,8 +457,8 @@ function GameBoard({ game, me, roomCode, onAction, onLeave }) {
     <main className="game-shell">
       <header className="game-header">
         <div className="brand"><span className="brand-gem">◆</span><span>보석친구</span></div>
-        <div className="turn-banner"><Avatar avatar={game.players[game.turn]?.avatar} size="sm" /><span>{game.status === "finished" ? "게임이 끝났어요" : isMyTurn ? "내 차례예요!" : `${game.players[game.turn]?.name}님의 차례`}</span><small>ROUND {game.round}</small><b className={timeLeft <= 10 ? "urgent" : ""}><Clock3 /> {game.status === "finished" ? "--" : timeLeft}</b></div>
-        <div className="header-actions"><button onClick={() => document.getElementById("rules")?.showModal()}><HelpCircle /></button><button onClick={onLeave}><LogOut /></button></div>
+        <div className="turn-banner" aria-live="polite"><Avatar avatar={game.players[game.turn]?.avatar} size="sm" /><span>{game.status === "finished" ? "게임이 끝났어요" : isMyTurn ? "내 차례예요!" : `${game.players[game.turn]?.name}님의 차례`}</span><small>ROUND {game.round}</small><b className={timeLeft <= 10 ? "urgent" : ""}><Clock3 /> {game.status === "finished" ? "--" : timeLeft}</b></div>
+        <div className="header-actions"><button onClick={onTutorial} aria-label="튜토리얼 열기"><BookOpenCheck /></button><button onClick={() => document.getElementById("rules")?.showModal()} aria-label="규칙 요약 열기"><HelpCircle /></button><button onClick={onLeave} aria-label="게임 나가기"><LogOut /></button></div>
       </header>
       <div className="game-layout">
         <div className="board-area">
@@ -511,7 +517,7 @@ function WinnerModal({ game, me, onLeave }) {
   return <div className="modal-backdrop celebration"><div className="winner-modal"><div className="winner-crown">👑</div><span>{won ? "내가 해냈어요!" : "멋진 승부였어요!"}</span><h1>{winners.map((player) => player.name).join(", ")} 승리</h1><p>동점일 때는 구매한 개발 카드가 더 적은 플레이어가 승리해요.</p><div className="scoreboard">{[...game.players].sort((a, b) => playerScore(b) - playerScore(a)).map((player, index) => <div key={player.id}><b>{index + 1}</b><Avatar avatar={player.avatar} /><span>{player.name}</span><strong>{playerScore(player)}점</strong><small>카드 {player.cards.length}장</small></div>)}</div><button className="primary-button" onClick={onLeave}>랜딩으로 돌아가기</button></div></div>;
 }
 
-function DemoGame() {
+function DemoGame({ onTutorial }) {
   const demoPlayers = useMemo(() => [
     { id: "demo-me", name: "준희", avatar: "chiikawa" },
     { id: "demo-friend", name: "보석친구", avatar: "hachiware" },
@@ -522,10 +528,10 @@ function DemoGame() {
     try { setDemoGame((current) => applyAction(current, demoMe.id, action)); }
     catch { /* QA용 데모에서는 잘못된 동작을 그대로 무시해요. */ }
   };
-  return <GameBoard game={demoGame} me={demoMe} roomCode="DEMO1" onAction={onAction} onLeave={() => { location.href = location.pathname; }} />;
+  return <GameBoard game={demoGame} me={demoMe} roomCode="DEMO1" onAction={onAction} onLeave={() => { location.href = location.pathname; }} onTutorial={onTutorial} />;
 }
 
-function SoloGame({ profile, difficulty, onLeave }) {
+function SoloGame({ profile, difficulty, onLeave, onTutorial }) {
   const bot = useMemo(() => ({ id: `bot-${difficulty}`, name: "보석콩 BOT", avatar: "momonga", isBot: true, difficulty }), [difficulty]);
   const [game, setGame] = useState(() => createGame([profile, bot], `SOLO-${difficulty.toUpperCase()}`));
   const [error, setError] = useState("");
@@ -561,21 +567,29 @@ function SoloGame({ profile, difficulty, onLeave }) {
     try { setError(""); setGame((current) => applyAction(current, profile.id, action)); }
     catch (actionError) { setError(actionError instanceof Error ? actionError.message : "행동을 처리하지 못했어요."); }
   };
-  return <><GameBoard game={game} me={profile} roomCode={`SOLO · ${BOT_LEVELS[difficulty].label}`} onAction={onAction} onLeave={onLeave} />{error && <div className="global-error"><span>{error}</span><button onClick={() => setError("")}><X size={18} /></button></div>}</>;
+  return <><GameBoard game={game} me={profile} roomCode={`SOLO · ${BOT_LEVELS[difficulty].label}`} onAction={onAction} onLeave={onLeave} onTutorial={onTutorial} />{error && <div className="global-error"><span>{error}</span><button onClick={() => setError("")} aria-label="오류 닫기"><X size={18} /></button></div>}</>;
 }
 
 export default function App() {
   const isDemo = new URLSearchParams(location.search).get("demo") === "1";
   const [soloConfig, setSoloConfig] = useState(null);
+  const [tutorialOpen, setTutorialOpen] = useState(false);
   const multiplayer = useMultiplayer();
-  if (isDemo) return <DemoGame />;
-  if (soloConfig) return <SoloGame profile={soloConfig.profile} difficulty={soloConfig.difficulty} onLeave={() => setSoloConfig(null)} />;
+  let content;
+  if (isDemo) content = <DemoGame onTutorial={() => setTutorialOpen(true)} />;
+  else if (soloConfig) content = <SoloGame profile={soloConfig.profile} difficulty={soloConfig.difficulty} onLeave={() => setSoloConfig(null)} onTutorial={() => setTutorialOpen(true)} />;
+  else content = (
+    <>
+      {multiplayer.mode === "landing" && <Landing onHost={multiplayer.hostRoom} onJoin={multiplayer.joinRoom} onSolo={(profile, difficulty) => setSoloConfig({ profile, difficulty })} onTutorial={() => setTutorialOpen(true)} connecting={multiplayer.connectionState} />}
+      {multiplayer.mode === "lobby" && <Lobby lobby={multiplayer.lobby} me={multiplayer.me} isHost={multiplayer.isHost} onStart={multiplayer.startGame} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} />}
+      {multiplayer.mode === "game" && multiplayer.game && <GameBoard game={multiplayer.game} me={multiplayer.me} roomCode={multiplayer.roomCode} onAction={multiplayer.sendAction} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} />}
+      {multiplayer.error && <div className="global-error"><span>{multiplayer.error}</span><button onClick={() => multiplayer.setError("")} aria-label="오류 닫기"><X size={18} /></button></div>}
+    </>
+  );
   return (
     <>
-      {multiplayer.mode === "landing" && <Landing onHost={multiplayer.hostRoom} onJoin={multiplayer.joinRoom} onSolo={(profile, difficulty) => setSoloConfig({ profile, difficulty })} connecting={multiplayer.connectionState} />}
-      {multiplayer.mode === "lobby" && <Lobby lobby={multiplayer.lobby} me={multiplayer.me} isHost={multiplayer.isHost} onStart={multiplayer.startGame} onLeave={multiplayer.leave} />}
-      {multiplayer.mode === "game" && multiplayer.game && <GameBoard game={multiplayer.game} me={multiplayer.me} roomCode={multiplayer.roomCode} onAction={multiplayer.sendAction} onLeave={multiplayer.leave} />}
-      {multiplayer.error && <div className="global-error"><span>{multiplayer.error}</span><button onClick={() => multiplayer.setError("")}><X size={18} /></button></div>}
+      {content}
+      {tutorialOpen && <TutorialDialog onClose={() => setTutorialOpen(false)} />}
     </>
   );
 }
