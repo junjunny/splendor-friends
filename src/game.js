@@ -169,7 +169,9 @@ export function createDeck(tier, seed = "gem-friends") {
         tier: cardTier,
         bonus,
         points,
-        art: useBackground ? BACKGROUND_ART[index % BACKGROUND_ART.length] : CHARACTER_ART[index % CHARACTER_ART.length],
+        // 모든 카드가 서로 다른 파일을 가리키도록 고유 SVG 아트 키를 부여해요.
+        // SVG 안에서 먼작귀 원화와 배경을 카드별로 다른 크롭/장식으로 합성합니다.
+        art: `generated/card-${String(index).padStart(3, "0")}.svg`,
         artVariant: index,
         artType: useBackground ? "background" : "character",
         cost: Object.fromEntries(COLORS.map((color, colorIndex) => [color, costs[colorIndex]])),
@@ -233,6 +235,7 @@ export function createGame(players, roomCode = "JEWEL") {
     turnDeadline: Date.now() + TURN_DURATION_MS,
     pending: null,
     log: [`${players[0].name}님의 차례로 게임을 시작했어요!`],
+    activity: [{ type: "turn", playerId: players[0].id, playerName: players[0].name, text: `${players[0].name}님의 차례로 게임을 시작했어요!` }],
     winnerIds: [],
   };
 }
@@ -278,8 +281,9 @@ function currentPlayer(game, playerId) {
   return player;
 }
 
-function addLog(game, message) {
+function addLog(game, message, activity = {}) {
   game.log = [message, ...game.log].slice(0, 16);
+  game.activity = [{ ...activity, id: `activity-${Date.now()}-${game.log.length}`, text: message }, ...(game.activity || [])].slice(0, 16);
 }
 
 function describeColors(colors) {
@@ -292,7 +296,7 @@ function finishTurn(game, player) {
     const noble = nobles[0];
     player.nobles.push(noble);
     game.nobles = game.nobles.filter((item) => item.id !== noble.id);
-    addLog(game, `${player.name}님에게 귀족이 찾아왔어요! +3점`);
+    addLog(game, `${player.name}님에게 귀족이 찾아왔어요! +3점`, { type: "noble", playerId: player.id, playerName: player.name });
   } else if (nobles.length > 1) {
     game.pending = { type: "noble", playerId: player.id, nobleIds: nobles.map((noble) => noble.id) };
     return game;
@@ -329,7 +333,7 @@ function advanceTurn(game, actingPlayer) {
   if (game.turn === 0) game.round += 1;
   game.turnStartedAt = Date.now();
   game.turnDeadline = game.turnStartedAt + TURN_DURATION_MS;
-  addLog(game, `${game.players[game.turn].name}님의 차례예요.`);
+  addLog(game, `${game.players[game.turn].name}님의 차례예요.`, { type: "turn", playerId: game.players[game.turn].id, playerName: game.players[game.turn].name });
   return game;
 }
 
@@ -347,7 +351,7 @@ export function takeTokens(gameInput, playerId, colors) {
     throw new Error("서로 다른 색 최대 3개 또는 같은 색 2개를 골라주세요.");
   }
   colors.forEach((color) => { game.supply[color] -= 1; player.tokens[color] += 1; });
-  addLog(game, `${player.name}님이 ${describeColors(colors)} 보석을 가져갔어요.`);
+  addLog(game, `${player.name}님이 ${describeColors(colors)} 보석을 가져갔어요.`, { type: "take", playerId: player.id, playerName: player.name, colors: [...colors] });
   return afterAction(game, player);
 }
 
@@ -371,7 +375,7 @@ export function buyCard(gameInput, playerId, source, cardId) {
   ALL_TOKENS.forEach((color) => { player.tokens[color] -= payment[color]; game.supply[color] += payment[color]; });
   found.remove();
   player.cards.push(found.card);
-  addLog(game, `${player.name}님이 ${found.card.tier}단계 ${COLOR_META[found.card.bonus].short} 카드 구매 · 보너스 ${COLOR_META[found.card.bonus].short}${found.card.points ? ` · +${found.card.points}점` : ""}`);
+  addLog(game, `${player.name}님이 ${found.card.tier}단계 ${COLOR_META[found.card.bonus].short} 카드 구매 · 보너스 ${COLOR_META[found.card.bonus].short}${found.card.points ? ` · +${found.card.points}점` : ""}`, { type: "buy", playerId: player.id, playerName: player.name, card: found.card });
   return finishTurn(game, player);
 }
 
@@ -393,7 +397,7 @@ export function reserveCard(gameInput, playerId, source, cardId = null) {
   player.reserved.push(card);
   const receivedGold = game.supply.gold > 0;
   if (receivedGold) { game.supply.gold -= 1; player.tokens.gold += 1; }
-  addLog(game, `${player.name}님이 ${tier}단계 카드를 예약했어요.${receivedGold ? " 골드 조커 +1" : ""}`);
+  addLog(game, `${player.name}님이 ${tier}단계 카드를 예약했어요.${receivedGold ? " 골드 조커 +1" : ""}`, { type: "reserve", playerId: player.id, playerName: player.name, card, receivedGold });
   return afterAction(game, player);
 }
 
@@ -411,7 +415,7 @@ export function discardTokens(gameInput, playerId, tokens) {
     game.supply[color] += count;
   }
   game.pending = null;
-  addLog(game, `${player.name}님이 보석 ${total}개를 반납했어요.`);
+  addLog(game, `${player.name}님이 보석 ${total}개를 반납했어요.`, { type: "discard", playerId: player.id, playerName: player.name, colors: Object.entries(tokens || {}).flatMap(([color, count]) => Array.from({ length: count || 0 }, () => color)) });
   return finishTurn(game, player);
 }
 
@@ -424,7 +428,7 @@ export function chooseNoble(gameInput, playerId, nobleId) {
   player.nobles.push(noble);
   game.nobles = game.nobles.filter((item) => item.id !== nobleId);
   game.pending = null;
-  addLog(game, `${player.name}님이 귀족을 맞이했어요! +3점`);
+  addLog(game, `${player.name}님이 귀족을 맞이했어요! +3점`, { type: "noble", playerId: player.id, playerName: player.name });
   return advanceTurn(game, player);
 }
 

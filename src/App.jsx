@@ -357,7 +357,7 @@ function Token({ color, count, selected = 0, onClick, compact = false }) {
   const meta = COLOR_META[color];
   return (
     <button className={`token token-${color} ${selected ? "token-selected" : ""} ${compact ? "token-compact" : ""}`} onClick={onClick} disabled={!onClick} style={{ "--token-color": meta.hex }} aria-label={`${meta.label} ${count}개`} title={meta.label}>
-      <span className={`token-gem shape-${meta.shape}`}><span className="token-face">••</span><strong>{meta.short}</strong><small>{meta.icon}</small></span>
+      <span className={`token-gem shape-${meta.shape}`}><span className="token-glint" /></span>
       <span className="token-count">{count}</span>{selected > 0 && <b className="selected-count">+{selected}</b>}
     </button>
   );
@@ -365,7 +365,7 @@ function Token({ color, count, selected = 0, onClick, compact = false }) {
 
 function MiniGem({ color, count }) {
   const meta = COLOR_META[color];
-  return <span className={`mini-gem mini-${color} mini-shape-${meta.shape}`} title={meta.label}><i>{meta.short}</i>{count !== undefined && <b>{count}</b>}</span>;
+  return <span className={`mini-gem mini-${color} mini-shape-${meta.shape}`} title={meta.label}>{count !== undefined && <b>{count}</b>}</span>;
 }
 
 function DevelopmentCard({ card, canAct, onBuy, onReserve, source }) {
@@ -382,7 +382,7 @@ function DevelopmentCard({ card, canAct, onBuy, onReserve, source }) {
   return (
     <article className={`dev-card bonus-${card.bonus}`} style={{ "--bonus-color": COLOR_META[card.bonus].hex }}>
       <div className="card-top"><strong>{card.points || ""}</strong><span className={`card-bonus mini-shape-${COLOR_META[card.bonus].shape}`} title={`${COLOR_META[card.bonus].label} 영구 할인`}>{COLOR_META[card.bonus].short}</span></div>
-      <div className={`card-art card-art-${card.artType} card-art-v-${artVariant}`} style={artStyle}><img src={`/assets/cards/${card.art}.png`} alt="먼작귀 팬아트 카드" loading="lazy" /><i>LEVEL {card.tier} · #{(card.artVariant ?? 0) + 1}</i></div>
+      <div className={`card-art card-art-${card.artType} card-art-v-${artVariant}`} style={artStyle}><img src={`/assets/cards/${card.art}`} alt="먼작귀 팬아트 카드" loading="lazy" /><i>LEVEL {card.tier} · #{(card.artVariant ?? 0) + 1}</i></div>
       <div className="cost-list">
         {COLORS.filter((color) => card.cost[color] > 0).map((color) => <MiniGem key={color} color={color} count={card.cost[color]} />)}
       </div>
@@ -397,6 +397,40 @@ function DevelopmentCard({ card, canAct, onBuy, onReserve, source }) {
 function NobleCard({ noble, selectable, onClick }) {
   return (
     <button className={`noble-card ${selectable ? "selectable" : ""}`} onClick={onClick} disabled={!selectable}><Crown size={21} /><strong>3</strong><div>{Object.entries(noble.cost).map(([color, count]) => <MiniGem key={color} color={color} count={count} />)}</div></button>
+  );
+}
+
+function ActivityCardThumb({ card }) {
+  if (!card) return null;
+  return <div className="activity-card-thumb"><img src={`/assets/cards/${card.art}`} alt="행동 카드" /><span>{card.points || 0}</span></div>;
+}
+
+function ActivityEvent({ event, me, players = [] }) {
+  const current = event || {};
+  const mine = current.playerId === me?.id;
+  const actor = players.find((player) => player.id === current.playerId);
+  const colors = current.colors || [];
+  const groupedColors = [...new Set(colors)].map((color) => ({ color, count: colors.filter((item) => item === color).length }));
+  const playerLabel = `${current.playerName || "플레이어"}${mine ? " · 나" : ""}`;
+  let actionLabel = "게임 소식";
+  if (current.type === "take") actionLabel = "보석 가져감";
+  if (current.type === "discard") actionLabel = "보석 반납";
+  if (current.type === "buy") actionLabel = "개발 카드 구매";
+  if (current.type === "reserve") actionLabel = "카드 예약";
+  if (current.type === "noble") actionLabel = "귀족 방문";
+  if (current.type === "turn") actionLabel = "차례 시작";
+  return (
+    <div className={`activity-event ${mine ? "mine" : ""}`}>
+      <Avatar avatar={actor?.avatar || (mine ? "ruby" : "sapphire")} size="sm" />
+      <div className="activity-copy"><strong>{playerLabel}</strong><span>{actionLabel}</span></div>
+      <div className="activity-visual">
+        {(current.type === "take" || current.type === "discard") && groupedColors.map(({ color, count }) => <MiniGem key={color} color={color} count={count} />)}
+        {(current.type === "buy" || current.type === "reserve") && <ActivityCardThumb card={current.card} />}
+        {current.type === "reserve" && current.receivedGold && <MiniGem color="gold" count={1} />}
+        {current.type === "noble" && <span className="activity-noble">♛</span>}
+        {(current.type === "turn" || current.type === "info" || !current.type) && <span className="activity-dot">•</span>}
+      </div>
+    </div>
   );
 }
 
@@ -426,6 +460,7 @@ function GameBoard({ game, me, roomCode, onAction, onLeave }) {
   const [mobilePanel, setMobilePanel] = useState(false);
   const [timeLeft, setTimeLeft] = useState(() => Math.max(0, Math.ceil((game.turnDeadline - Date.now()) / 1000)));
   const player = game.players.find((item) => item.id === me?.id);
+  const activities = game.activity || game.log.map((text) => ({ type: "info", text }));
   const isMyTurn = game.status === "playing" && game.players[game.turn]?.id === me?.id;
   const canMainAction = isMyTurn && !game.pending;
 
@@ -474,7 +509,7 @@ function GameBoard({ game, me, roomCode, onAction, onLeave }) {
           <section className="activity-feed panel-card">
             <div className="section-title"><div><span>실시간 플레이</span><small>상대의 점수와 최근 행동</small></div><b className="activity-live">LIVE</b></div>
             <div className="score-strip">{game.players.map((item) => <span key={item.id} className={item.id === me?.id ? "is-me" : ""}><Avatar avatar={item.avatar} size="sm" /><b>{item.name}</b><strong>{playerScore(item)}점</strong></span>)}</div>
-            <div className="activity-list">{game.log.slice(0, 4).map((item, index) => <p key={`${item}-${index}`}><i>{index === 0 ? "방금" : `${index}턴 전`}</i>{item}</p>)}</div>
+            <div className="activity-list">{activities.slice(0, 5).map((item, index) => <ActivityEvent key={`${item.id || item.text}-${index}`} event={item} me={me} players={game.players} />)}</div>
           </section>
 
           <section className="market panel-card">
@@ -489,7 +524,7 @@ function GameBoard({ game, me, roomCode, onAction, onLeave }) {
           <button className="mobile-panel-toggle" onClick={() => setMobilePanel((value) => !value)}><Users size={18} /> 플레이어 {mobilePanel ? <X /> : <ChevronRight />}</button>
           <div className="room-mini"><span>ROOM</span><b>{roomCode}</b></div>
           <div className="players-stack">{game.players.map((item, index) => <PlayerPanel key={item.id} player={item} active={index === game.turn && game.status !== "finished"} me={item.id === me?.id} canAct={canMainAction} onBuyReserved={(card) => buy(card, "reserved")} />)}</div>
-          <div className="game-log"><strong>게임 소식</strong>{game.log.slice(0, 6).map((item, index) => <p key={`${item}-${index}`}>{item}</p>)}</div>
+          <div className="game-log"><strong>행동 기록</strong>{activities.slice(0, 6).map((item, index) => <ActivityEvent key={`${item.id || item.text}-${index}`} event={item} me={me} players={game.players} />)}</div>
         </aside>
       </div>
       {notice && <div className="toast">{notice}</div>}
