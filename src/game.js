@@ -287,7 +287,7 @@ function addLog(game, message, activity = {}) {
 }
 
 function describeColors(colors) {
-  return colors.map((color) => COLOR_META[color]?.short || color).join(" · ");
+  return colors.map((color) => COLOR_META[color]?.label || color).join(" · ");
 }
 
 function finishTurn(game, player) {
@@ -375,7 +375,7 @@ export function buyCard(gameInput, playerId, source, cardId) {
   ALL_TOKENS.forEach((color) => { player.tokens[color] -= payment[color]; game.supply[color] += payment[color]; });
   found.remove();
   player.cards.push(found.card);
-  addLog(game, `${player.name}님이 ${found.card.tier}단계 ${COLOR_META[found.card.bonus].short} 카드 구매 · 보너스 ${COLOR_META[found.card.bonus].short}${found.card.points ? ` · +${found.card.points}점` : ""}`, { type: "buy", playerId: player.id, playerName: player.name, card: found.card });
+  addLog(game, `${player.name}님이 ${found.card.tier}단계 ${COLOR_META[found.card.bonus].label} 카드를 샀어요${found.card.points ? ` · +${found.card.points}점` : ""}`, { type: "buy", playerId: player.id, playerName: player.name, card: found.card });
   return finishTurn(game, player);
 }
 
@@ -393,6 +393,7 @@ export function reserveCard(gameInput, playerId, source, cardId = null) {
   } else {
     card = game.decks[tier]?.pop();
     if (!card) throw new Error("카드 더미가 비었어요.");
+    card.secret = true; // 더미에서 뽑은 예약 카드는 본인만 볼 수 있어요.
   }
   player.reserved.push(card);
   const receivedGold = game.supply.gold > 0;

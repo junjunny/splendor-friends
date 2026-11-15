@@ -32,11 +32,17 @@ try {
     const stage = join(stagingDirectory, `card-${String(index).padStart(3, "0")}.jpg`);
     const destination = join(outputDirectory, `card-${String(index).padStart(3, "0")}.jpg`);
 
+    // 원본이 정사각형이 아니면 먼저 가운데를 정사각형으로 잘라 검은 여백이 생기지 않게 해요.
+    const { stdout } = await execFileAsync("sips", ["-g", "pixelWidth", "-g", "pixelHeight", source]);
+    const side = String(Math.min(...stdout.match(/\d+$/gm).map(Number)));
+    // sips는 한 번에 넘기면 리사이즈를 먼저 해버려서 자르기와 리사이즈를 따로 실행해요.
+    const square = join(stagingDirectory, `square-${index}.png`);
+    await execFileAsync("sips", ["-c", side, side, source, "--out", square]);
     await execFileAsync("sips", [
-      "-Z", "760",
+      "-z", "760", "760",
       "-s", "format", "jpeg",
       "-s", "formatOptions", "84",
-      source,
+      square,
       "--out", stage,
     ]);
 

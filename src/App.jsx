@@ -32,6 +32,16 @@ const makeRoomCode = () => {
   return Array.from({ length: 5 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
 };
 
+const SESSION_KEY = "gemfriends-session";
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+const loadSession = () => {
+  try {
+    const session = JSON.parse(localStorage.getItem(SESSION_KEY));
+    return session && Date.now() - session.savedAt < SESSION_TTL_MS ? session : null;
+  } catch { return null; }
+};
+const peerIdFor = (code) => `gemfriends-${code.toLowerCase()}`;
+
 function useMultiplayer() {
   const [mode, setMode] = useState("landing");
   const [roomCode, setRoomCode] = useState("");
@@ -46,6 +56,7 @@ function useMultiplayer() {
   const isHostRef = useRef(false);
   const lobbyRef = useRef(null);
   const gameRef = useRef(null);
+  const retryRef = useRef(null);
 
   const setLobbyState = useCallback((next) => {
     lobbyRef.current = next;
@@ -55,6 +66,13 @@ function useMultiplayer() {
     gameRef.current = next;
     setGame(next);
   }, []);
+
+  // 모바일에서 카톡으로 코드를 보내러 나갔다 오면 브라우저가 연결을 끊거나 탭을 새로 고쳐요.
+  // 방 상태를 저장해 두고 돌아왔을 때 같은 방 코드로 다시 열어요.
+  useEffect(() => {
+    if (!roomCode || !profileRef.current) return;
+    localStorage.setItem(SESSION_KEY, JSON.stringify({ isHost: isHostRef.current, roomCode, profile: profileRef.current, lobby, game, savedAt: Date.now() }));
+  }, [roomCode, lobby, game]);
 
   const broadcast = useCallback((payload) => {
     guestConnectionsRef.current.forEach(({ connection }) => {
@@ -88,19 +106,26 @@ function useMultiplayer() {
       if (!message || typeof message !== "object") return;
       if (message.type === "join") {
         const currentLobby = lobbyRef.current;
-        if (!currentLobby || currentLobby.status !== "waiting") {
-          connection.send({ type: "error", message: "이미 게임이 시작된 방이에요." });
+        const profile = message.profile;
+        if (!currentLobby || !profile?.id) return;
+        if (currentLobby.status !== "waiting") {
+          // 게임 중 끊겼던 플레이어는 같은 자리로 다시 들어와요.
+          if (gameRef.current?.players.some((player) => player.id === profile.id)) {
+            guestConnectionsRef.current.set(profile.id, { connection, playerId: profile.id });
+            connection.send({ type: "lobby", lobby: currentLobby });
+            connection.send({ type: "game", game: gameRef.current });
+          } else connection.send({ type: "error", message: "이미 게임이 시작된 방이에요." });
           return;
         }
-        const existing = currentLobby.players.find((player) => player.id === message.profile.id);
+        const existing = currentLobby.players.find((player) => player.id === profile.id);
         if (!existing && currentLobby.players.length >= 4) {
           connection.send({ type: "error", message: "방이 가득 찼어요." });
           return;
         }
         const players = existing
-          ? currentLobby.players.map((player) => player.id === message.profile.id ? { ...message.profile, connected: true } : player)
-          : [...currentLobby.players, { ...message.profile, connected: true }];
-        guestConnectionsRef.current.set(message.profile.id, { connection, playerId: message.profile.id });
+          ? currentLobby.players.map((player) => player.id === profile.id ? { ...profile, connected: true } : player)
+          : [...currentLobby.players, { ...profile, connected: true }];
+        guestConnectionsRef.current.set(profile.id, { connection, playerId: profile.id });
         publishLobby({ ...currentLobby, players });
       }
       if (message.type === "action") {
@@ -119,6 +144,7 @@ function useMultiplayer() {
   }, [publishLobby, runAction]);
 
   const cleanup = useCallback(() => {
+    clearTimeout(retryRef.current);
     peerRef.current?.destroy();
     peerRef.current = null;
     hostConnectionRef.current = null;
@@ -127,6 +153,19 @@ function useMultiplayer() {
   }, []);
 
   useEffect(() => cleanup, [cleanup]);
+
+  // 시그널링 서버와의 연결만 끊긴 경우(백그라운드 전환 등) 같은 ID로 다시 붙어요.
+  const reconnectSoon = useCallback((peer) => {
+    setTimeout(() => { if (peerRef.current === peer && !peer.destroyed && peer.disconnected) peer.reconnect(); }, 1000);
+  }, []);
+  useEffect(() => {
+    const onVisible = () => {
+      const peer = peerRef.current;
+      if (document.visibilityState === "visible" && peer && !peer.destroyed && peer.disconnected) peer.reconnect();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
 
   useEffect(() => {
     if (!isHostRef.current || game?.status !== "playing" || !game.turnDeadline) return undefined;
@@ -141,30 +180,50 @@ function useMultiplayer() {
     return () => clearTimeout(timer);
   }, [game?.status, game?.turnDeadline, publishGame]);
 
-  const hostRoom = useCallback((profile) => {
+  const hostRoom = useCallback((profile, resume = null) => {
     cleanup();
-    const code = makeRoomCode();
-    const peer = new Peer(`gemfriends-${code.toLowerCase()}`);
-    peerRef.current = peer;
+    const code = resume?.roomCode || makeRoomCode();
     profileRef.current = profile;
     isHostRef.current = true;
-    setConnectionState("connecting");
-    peer.on("open", () => {
-      const nextLobby = { roomCode: code, status: "waiting", hostId: profile.id, players: [{ ...profile, connected: true }] };
+    if (resume) {
       setRoomCode(code);
-      setLobbyState(nextLobby);
-      setMode("lobby");
-      setConnectionState("connected");
-      history.replaceState(null, "", `?room=${code}`);
-    });
-    peer.on("connection", attachGuestConnection);
-    peer.on("error", (peerError) => {
-      setError(peerError.type === "unavailable-id" ? "방 코드가 겹쳤어요. 다시 만들어주세요." : "방을 열지 못했어요. 잠시 후 다시 시도해주세요.");
-      setConnectionState("error");
-    });
-  }, [attachGuestConnection, cleanup, setLobbyState]);
+      setLobbyState(resume.lobby);
+      setGameState(resume.game);
+      setMode(resume.game ? "game" : "lobby");
+    }
+    setConnectionState(resume ? "reconnecting" : "connecting");
+    let attempts = 0;
+    const open = () => {
+      const peer = new Peer(peerIdFor(code));
+      peerRef.current = peer;
+      peer.on("open", () => {
+        if (!lobbyRef.current) {
+          setRoomCode(code);
+          setLobbyState({ roomCode: code, status: "waiting", hostId: profile.id, players: [{ ...profile, connected: true }] });
+          setMode("lobby");
+        }
+        attempts = 0;
+        setConnectionState("connected");
+        history.replaceState(null, "", `?room=${code}`);
+      });
+      peer.on("connection", attachGuestConnection);
+      peer.on("disconnected", () => reconnectSoon(peer));
+      peer.on("error", (peerError) => {
+        if (peerRef.current !== peer) return;
+        if (lobbyRef.current && (attempts += 1) <= 20) {
+          // 이미 열린 방은 닫지 않고, 서버에 예전 ID가 남아 있으면 잠시 뒤 다시 열어요.
+          setConnectionState("reconnecting");
+          if (peer.destroyed) retryRef.current = setTimeout(open, 2000);
+          return;
+        }
+        setError(peerError.type === "unavailable-id" && !lobbyRef.current ? "방 코드가 겹쳤어요. 다시 만들어주세요." : "방을 열지 못했어요. 잠시 후 다시 시도해주세요.");
+        setConnectionState("error");
+      });
+    };
+    open();
+  }, [attachGuestConnection, cleanup, reconnectSoon, setGameState, setLobbyState]);
 
-  const joinRoom = useCallback((profile, rawCode) => {
+  const joinRoom = useCallback((profile, rawCode, resume = null) => {
     cleanup();
     const code = rawCode.trim().toUpperCase();
     if (code.length !== 5) { setError("5자리 방 코드를 확인해주세요."); return; }
@@ -172,18 +231,42 @@ function useMultiplayer() {
     peerRef.current = peer;
     profileRef.current = profile;
     isHostRef.current = false;
-    setConnectionState("connecting");
-    peer.on("open", () => {
-      const connection = peer.connect(`gemfriends-${code.toLowerCase()}`, { reliable: true });
+    let joined = Boolean(resume);
+    let attempts = 0;
+    if (resume) {
+      setRoomCode(code);
+      setLobbyState(resume.lobby);
+      setGameState(resume.game);
+      setMode(resume.game ? "game" : "lobby");
+    }
+    setConnectionState(resume ? "reconnecting" : "connecting");
+    const retry = () => {
+      if (peerRef.current !== peer) return;
+      attempts += 1;
+      // 처음 입장은 금방 포기하고, 한 번 들어온 방은 방장이 돌아올 때까지 2분쯤 기다려요.
+      if (peer.destroyed || attempts > (joined ? 60 : 2)) {
+        setError(joined ? "방장과 연결이 끊겼어요." : "방을 찾지 못했어요. 코드와 방장 접속 상태를 확인해주세요.");
+        setConnectionState("error");
+        return;
+      }
+      if (joined) setConnectionState("reconnecting");
+      retryRef.current = setTimeout(connect, 2000);
+    };
+    const connect = () => {
+      if (peerRef.current !== peer || peer.destroyed) return;
+      if (peer.disconnected) { peer.reconnect(); retry(); return; }
+      const connection = peer.connect(peerIdFor(code), { reliable: true });
       hostConnectionRef.current = connection;
-      const timeout = setTimeout(() => {
-        if (!connection.open) { setError("방을 찾지 못했어요. 코드와 방장 접속 상태를 확인해주세요."); setConnectionState("error"); }
-      }, 8000);
+      let failed = false;
+      const fail = () => { if (failed || hostConnectionRef.current !== connection) return; failed = true; clearTimeout(timeout); connection.close(); retry(); };
+      const timeout = setTimeout(() => { if (!connection.open) fail(); }, 6000);
       connection.on("open", () => {
         clearTimeout(timeout);
+        attempts = 0;
+        joined = true;
         connection.send({ type: "join", profile });
         setRoomCode(code);
-        setMode("lobby");
+        if (!gameRef.current) setMode("lobby");
         setConnectionState("connected");
         history.replaceState(null, "", `?room=${code}`);
       });
@@ -192,10 +275,25 @@ function useMultiplayer() {
         if (message.type === "game") { setGameState(message.game); setMode("game"); }
         if (message.type === "error") setError(message.message);
       });
-      connection.on("close", () => { setError("방장과 연결이 끊겼어요."); setConnectionState("error"); });
+      connection.on("close", fail);
+    };
+    peer.on("open", connect);
+    peer.on("disconnected", () => reconnectSoon(peer));
+    peer.on("error", (peerError) => {
+      if (peerRef.current !== peer || peerError.type === "peer-unavailable") return; // 방장 부재는 연결 타임아웃이 재시도해요.
+      if (!joined || peer.destroyed) { setError("친구 방에 연결하지 못했어요."); setConnectionState("error"); }
     });
-    peer.on("error", () => { setError("친구 방에 연결하지 못했어요."); setConnectionState("error"); });
-  }, [cleanup, setGameState, setLobbyState]);
+  }, [cleanup, reconnectSoon, setGameState, setLobbyState]);
+
+  // 탭이 새로 고쳐졌어도 주소의 방 코드가 저장된 방과 같으면 그 방으로 돌아가요.
+  useEffect(() => {
+    const session = loadSession();
+    const params = new URLSearchParams(location.search);
+    if (!session || params.get("demo") || params.get("room")?.toUpperCase() !== session.roomCode) return;
+    if (session.isHost) hostRoom(session.profile, session);
+    else joinRoom(session.profile, session.roomCode, session);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const startGame = useCallback(() => {
     if (!isHostRef.current || lobbyRef.current.players.length < 2) return;
@@ -211,10 +309,12 @@ function useMultiplayer() {
     if (!playerId) return;
     if (isHostRef.current) runAction(playerId, action);
     else if (hostConnectionRef.current?.open) hostConnectionRef.current.send({ type: "action", action });
+    else setError("다시 연결하는 중이에요. 잠시 후 눌러주세요.");
   }, [runAction]);
 
   const leave = useCallback(() => {
     cleanup();
+    localStorage.removeItem(SESSION_KEY);
     setMode("landing");
     setLobbyState(null);
     setGameState(null);
@@ -336,10 +436,13 @@ function RulesDialog() {
 function Lobby({ lobby, me, isHost, onStart, onLeave, onTutorial }) {
   const [copied, setCopied] = useState(false);
   const shareUrl = `${location.origin}${location.pathname}?room=${lobby?.roomCode || ""}`;
+  const inviteText = `보석친구 같이 하자! 방 코드 ${lobby?.roomCode}`;
   const copyInvite = async () => {
-    await navigator.clipboard.writeText(`보석친구 같이 하자! 방 코드 ${lobby.roomCode}\n${shareUrl}`);
+    await navigator.clipboard.writeText(`${inviteText}\n${shareUrl}`);
     setCopied(true); setTimeout(() => setCopied(false), 1800);
   };
+  // 공유 시트는 화면을 떠나지 않고 카톡으로 보낼 수 있어요.
+  const shareInvite = () => navigator.share({ title: "보석친구", text: inviteText, url: shareUrl }).catch(() => {});
   return (
     <main className="lobby-page">
       <div className="lobby-card">
@@ -347,7 +450,9 @@ function Lobby({ lobby, me, isHost, onStart, onLeave, onTutorial }) {
         <div className="eyebrow"><Users size={15} /> 친구를 기다리는 중</div>
         <h1>보석 파티 준비 완료!</h1>
         <p>친구에게 아래 코드를 알려주세요.</p>
-        <button className="room-code" onClick={copyInvite}><span>{lobby?.roomCode || "·····"}</span>{copied ? <Check /> : <Copy />}</button>
+        <button className="room-code" onClick={copyInvite} aria-label="초대 문구 복사"><span>{lobby?.roomCode || "·····"}</span>{copied ? <Check /> : <Copy />}</button>
+        {typeof navigator.share === "function" && <button className="share-invite" onClick={shareInvite}><Share2 size={17} /> 친구에게 공유하기</button>}
+        <p className="lobby-hint">다른 앱에 다녀와도 방은 그대로 유지돼요.</p>
         <div className="players-grid">
           {Array.from({ length: 4 }, (_, index) => {
             const player = lobby?.players[index];
@@ -356,7 +461,7 @@ function Lobby({ lobby, me, isHost, onStart, onLeave, onTutorial }) {
             ) : <div className="lobby-player empty" key={index}><span className="empty-avatar">+</span><strong>빈 자리</strong><small>친구를 초대해요</small></div>;
           })}
         </div>
-        {isHost ? <button className="primary-button start-button" disabled={!lobby || lobby.players.length < 2} onClick={onStart}><Play size={20} fill="currentColor" /> {lobby?.players.length < 2 ? "친구 한 명만 더!" : `${lobby.players.length}명으로 시작하기`}</button> : <div className="waiting-pill"><span /> 방장이 곧 시작해요</div>}
+        {isHost ? <button className="primary-button start-button" disabled={!lobby || lobby.players.length < 2} onClick={onStart}><Play size={20} fill="currentColor" /> {!lobby || lobby.players.length < 2 ? "친구 한 명만 더!" : `${lobby.players.length}명으로 시작하기`}</button> : <div className="waiting-pill"><span /> 방장이 곧 시작해요</div>}
         <div className="lobby-secondary-actions"><button className="text-button" onClick={onTutorial}><BookOpenCheck size={17} /> 시작 전 튜토리얼</button><button className="text-button leave-button" onClick={onLeave}><LogOut size={17} /> 방 나가기</button></div>
       </div>
     </main>
@@ -380,16 +485,17 @@ function MiniGem({ color, count }) {
 
 function DevelopmentCard({ card, canAct, onBuy, onReserve, source }) {
   const affordable = canAct && Boolean(onBuy);
+  const meta = COLOR_META[card.bonus];
   return (
-    <article className={`dev-card bonus-${card.bonus} ${canAct ? "is-actionable" : ""}`} style={{ "--bonus-color": COLOR_META[card.bonus].hex }}>
-      <div className="card-top"><strong>{card.points || ""}</strong><span className={`card-bonus mini-shape-${COLOR_META[card.bonus].shape}`} title={`${COLOR_META[card.bonus].label} 영구 할인`}>{COLOR_META[card.bonus].short}</span></div>
-      <div className={`card-art card-art-${card.artType}`}><img src={`/assets/cards/${card.art}`} alt={`먼작귀 ${card.tier}단계 카드 일러스트 ${card.artVariant + 1}`} loading={source === "reserved" ? "lazy" : "eager"} /></div>
+    <article className={`dev-card bonus-${card.bonus} ${canAct ? "is-actionable" : ""}`} style={{ "--bonus-color": meta.hex }}>
+      <img className="card-art" src={`/assets/cards/${card.art}`} alt={`먼작귀 ${card.tier}단계 카드 일러스트 ${card.artVariant + 1}`} loading="eager" />
+      <div className="card-top"><strong>{card.points || ""}</strong><span className={`card-bonus shape-${meta.shape}`} role="img" aria-label={`${meta.label} 보너스`} title={`${meta.label} 영구 할인`} /></div>
       <div className="cost-list">
         {COLORS.filter((color) => card.cost[color] > 0).map((color) => <MiniGem key={color} color={color} count={card.cost[color]} />)}
       </div>
       {canAct && <div className="card-actions">
         <button disabled={!affordable} onClick={onBuy}>{affordable ? "구매" : "부족"}</button>
-        {source !== "reserved" && <button className="reserve-button" onClick={onReserve}>예약</button>}
+        {source !== "reserved" && <button className="reserve-button" disabled={!onReserve} onClick={onReserve}>예약</button>}
       </div>}
     </article>
   );
@@ -397,34 +503,54 @@ function DevelopmentCard({ card, canAct, onBuy, onReserve, source }) {
 
 function NobleCard({ noble, selectable, onClick }) {
   return (
-    <button className={`noble-card ${selectable ? "selectable" : ""}`} onClick={onClick} disabled={!selectable}><Crown size={21} /><strong>3</strong><div>{Object.entries(noble.cost).map(([color, count]) => <MiniGem key={color} color={color} count={count} />)}</div></button>
+    <button className={`noble-card ${selectable ? "selectable" : ""}`} onClick={onClick} disabled={!selectable} aria-label={`귀족 3점 · ${Object.entries(noble.cost).map(([color, count]) => `${COLOR_META[color].label} 카드 ${count}장`).join(", ")}`}><span><Crown size={15} /><strong>3</strong></span><div>{Object.entries(noble.cost).map(([color, count]) => <MiniGem key={color} color={color} count={count} />)}</div></button>
   );
+}
+
+// 예약 카드: 공개 카드에서 예약한 건 모두에게 보이고, 더미에서 뽑은 건 본인만 볼 수 있어요(실제 보드게임과 동일).
+function ReservedChip({ card, hidden, mine, canBuy, onBuy }) {
+  if (hidden) return <span className={`reserved-chip reserved-hidden deck-${card.tier}`} role="img" aria-label={`${card.tier}단계 비공개 예약 카드`}>{card.tier}<small>?</small></span>;
+  const meta = COLOR_META[card.bonus];
+  const label = `${card.tier}단계 ${meta.label} 카드${card.points ? ` ${card.points}점` : ""}`;
+  const body = <><span className={`asset-card mini-${card.bonus}`}>{card.points || ""}</span><span className="reserved-cost">{COLORS.filter((color) => card.cost[color] > 0).map((color) => <MiniGem key={color} color={color} count={card.cost[color]} />)}</span></>;
+  return mine
+    ? <button className={`reserved-chip ${canBuy ? "can-buy" : ""}`} disabled={!canBuy} onClick={onBuy} aria-label={`예약한 ${label} ${canBuy ? "구매" : "· 아직 살 수 없음"}`}>{body}{canBuy && <em>구매</em>}</button>
+    : <span className="reserved-chip" role="img" aria-label={`예약된 ${label}`}>{body}</span>;
 }
 
 function PlayerPanel({ player, active, me, canAct, onBuyReserved }) {
   const bonuses = playerBonuses(player);
-  const ownedTokens = ALL_TOKENS.filter((color) => player.tokens[color] > 0);
-  const ownedBonuses = COLORS.filter((color) => bonuses[color] > 0);
   return (
-    <section className={`player-panel ${active ? "active" : ""} ${me ? "me" : ""}`}>
-      <div className="player-head"><Avatar avatar={player.avatar} /><div><strong>{player.name}{me ? " · 나" : ""}{player.isBot && <em>{BOT_LEVELS[player.difficulty]?.label || "BOT"}</em>}</strong><span className="score-line"><b>{playerScore(player)}점</b> · 카드 {player.cards.length}장 · 귀족 {player.nobles.length}</span></div>{active && <i>차례</i>}</div>
-      <div className="bonus-row">{COLORS.map((color) => <span key={color} className={`bonus-chip bonus-${color} mini-shape-${COLOR_META[color].shape}`}><i>{COLOR_META[color].short}</i><b>{bonuses[color]}</b><small>+{player.tokens[color]}</small></span>)}<span className="bonus-chip bonus-gold mini-shape-star"><i>골</i><b>{player.tokens.gold}</b></span></div>
-      <div className="player-meta"><span>토큰 {tokenTotal(player)}/10</span><span>예약 {player.reserved.length}/3</span><span>귀족 {player.nobles.length}</span></div>
-      <details className="player-details" open={me}>
-        <summary>{me ? "내 보유 상태" : "상대 보유 상태"}</summary>
-        <div className="inventory-row"><span>보석</span><div className="inventory-items">{ownedTokens.length ? ownedTokens.map((color) => <MiniGem key={color} color={color} count={player.tokens[color]} />) : <small>없음</small>}</div></div>
-        <div className="inventory-row"><span>개발</span><div className="inventory-items">{ownedBonuses.length ? ownedBonuses.map((color) => <span className={`card-owned-chip bonus-${color}`} key={color}><i>{COLOR_META[color].short}</i><b>{bonuses[color]}장</b></span>) : <small>없음</small>}</div></div>
-        <div className="inventory-row"><span>예약</span><b>{player.reserved.length}장</b></div>
-      </details>
-      {me && player.reserved.length > 0 && <details className="reserved-list"><summary>내 예약 카드 보기</summary><div>{player.reserved.map((card) => <DevelopmentCard key={card.id} card={card} source="reserved" canAct={canAct} onBuy={paymentFor(player, card) ? () => onBuyReserved(card) : null} />)}</div></details>}
+    <section className={`player-panel ${active ? "active" : ""} ${me ? "me" : ""}`} aria-label={`${player.name} 현황`}>
+      <div className="player-head">
+        <Avatar avatar={player.avatar} size="sm" />
+        <strong>{player.name}{me ? " · 나" : ""}{player.isBot && <em>{BOT_LEVELS[player.difficulty]?.label || "BOT"}</em>}</strong>
+        {active && <i>차례</i>}
+        {player.nobles.length > 0 && <span className="noble-owned" title={`귀족 ${player.nobles.length}명 · ${player.nobles.length * 3}점`}><Crown size={14} />{player.nobles.length}</span>}
+        <b className="player-score" aria-label={`${playerScore(player)}점`}>{playerScore(player)}</b>
+      </div>
+      <div className="asset-row">
+        {COLORS.map((color) => (
+          <div className="asset-col" key={color} title={`${COLOR_META[color].label}: 카드 ${bonuses[color]}장 · 보석 ${player.tokens[color]}개`}>
+            <span className={`asset-card mini-${color} ${bonuses[color] ? "" : "is-zero"}`} aria-label={`${COLOR_META[color].label} 카드 ${bonuses[color]}장`}>{bonuses[color]}</span>
+            <span className={`asset-token mini-${color} ${player.tokens[color] ? "" : "is-zero"}`} aria-label={`${COLOR_META[color].label} 보석 ${player.tokens[color]}개`}>{player.tokens[color]}</span>
+          </div>
+        ))}
+        <div className="asset-col" title={`골드 조커 ${player.tokens.gold}개`}>
+          <span className="asset-total" aria-label={`개발 카드 ${player.cards.length}장`}>{player.cards.length}<small>장</small></span>
+          <span className={`asset-token mini-gold ${player.tokens.gold ? "" : "is-zero"}`} aria-label={`골드 조커 ${player.tokens.gold}개`}>{player.tokens.gold}</span>
+        </div>
+        <div className="asset-col asset-sum"><small>보석</small><b>{tokenTotal(player)}/10</b></div>
+      </div>
+      {player.reserved.length > 0 && <div className="reserved-row" aria-label={`예약 카드 ${player.reserved.length}장`}>
+        {player.reserved.map((card) => <ReservedChip key={card.id} card={card} hidden={!me && card.secret} mine={me} canBuy={me && canAct && Boolean(paymentFor(player, card))} onBuy={() => onBuyReserved(card)} />)}
+      </div>}
     </section>
   );
 }
 
 function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial }) {
   const [selectedTokens, setSelectedTokens] = useState([]);
-  const [notice, setNotice] = useState("");
-  const [mobilePanel, setMobilePanel] = useState(false);
   const [timeLeft, setTimeLeft] = useState(() => Math.max(0, Math.ceil((game.turnDeadline - Date.now()) / 1000)));
   const player = game.players.find((item) => item.id === me?.id);
   const isMyTurn = game.status === "playing" && game.players[game.turn]?.id === me?.id;
@@ -449,14 +575,14 @@ function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial }) {
     });
   };
   const validSelection = selectedTokens.length === 3 && new Set(selectedTokens).size === 3 || selectedTokens.length === 2 && new Set(selectedTokens).size === 1;
-  const act = (action) => { setNotice(""); onAction(action); };
+  const act = (action) => onAction(action);
   const buy = (card, source) => act({ type: "buy", source, cardId: card.id });
   const reserve = (card, tier) => act({ type: "reserve", source: String(tier), cardId: card.id });
 
   return (
     <main className="game-shell">
       <header className="game-header">
-        <div className="brand"><span className="brand-gem">◆</span><span>보석친구</span></div>
+        <div className="brand"><span className="brand-gem">◆</span><span>보석친구</span><small className="room-chip">{roomCode}</small></div>
         <div className="turn-banner" aria-live="polite"><Avatar avatar={game.players[game.turn]?.avatar} size="sm" /><span>{game.status === "finished" ? "게임이 끝났어요" : isMyTurn ? "내 차례예요!" : `${game.players[game.turn]?.name}님의 차례`}</span><small>ROUND {game.round}</small><b className={timeLeft <= 10 ? "urgent" : ""}><Clock3 /> {game.status === "finished" ? "--" : timeLeft}</b></div>
         <div className="header-actions"><button onClick={onTutorial} aria-label="튜토리얼 열기"><BookOpenCheck /></button><button onClick={() => document.getElementById("rules")?.showModal()} aria-label="규칙 요약 열기"><HelpCircle /></button><button onClick={onLeave} aria-label="게임 나가기"><LogOut /></button></div>
       </header>
@@ -464,34 +590,28 @@ function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial }) {
         <div className="board-area">
           <div className="board-top-row">
             <section className="supply-section panel-card">
-              <div className="section-title"><div><span>공급처</span><small>{canMainAction ? "보석을 눌러 골라주세요" : "공용 보석"}</small></div>{selectedTokens.length > 0 && <button className="clear-pick" onClick={() => setSelectedTokens([])}>선택 취소</button>}</div>
+              <div className="section-title"><span>공급처</span>
+                {selectedTokens.length > 0 && <><button className="take-confirm" disabled={!validSelection} onClick={() => act({ type: "take", colors: selectedTokens })}><Gem size={14} /> {validSelection ? `${selectedTokens.length}개 가져가기` : "3색 또는 같은 색 2개"}</button><button className="clear-pick" onClick={() => setSelectedTokens([])}>취소</button></>}
+              </div>
               <div className="token-row">{ALL_TOKENS.map((color) => <Token key={color} color={color} count={game.supply[color]} selected={selectedTokens.filter((item) => item === color).length} onClick={color !== "gold" && canMainAction ? () => selectToken(color) : null} />)}</div>
-              {selectedTokens.length > 0 && <button className="take-confirm" disabled={!validSelection} onClick={() => act({ type: "take", colors: selectedTokens })}><Gem size={18} /> {validSelection ? `${selectedTokens.length}개 가져가기` : "서로 다른 3개 또는 같은 2개"}</button>}
             </section>
-
-            <section className="nobles-section panel-card"><div className="section-title"><div><span>귀족 광장</span><small>조건을 채우면 3점</small></div></div><div className="nobles-row">{game.nobles.map((noble) => <NobleCard key={noble.id} noble={noble} />)}</div></section>
+            <section className="nobles-section panel-card"><div className="section-title"><span>귀족 광장</span><small>카드 조건 달성 시 3점</small></div><div className="nobles-row">{game.nobles.length ? game.nobles.map((noble) => <NobleCard key={noble.id} noble={noble} />) : <small className="nobles-empty">모든 귀족이 떠났어요</small>}</div></section>
           </div>
 
-          <section className="player-overview panel-card">
-            <div className="section-title"><div><span>플레이어 현황</span><small>점수·카드·예약·보유 보석</small></div></div>
-            <div className="score-strip">{game.players.map((item) => <span key={item.id} className={item.id === me?.id ? "is-me" : ""}><Avatar avatar={item.avatar} size="sm" /><div className="score-player"><b>{item.name}</b><small>카드 {item.cards.length}장 · 예약 {item.reserved.length}</small></div><strong>{playerScore(item)}점</strong><div className="score-assets">{ALL_TOKENS.filter((color) => item.tokens[color] > 0).map((color) => <MiniGem key={color} color={color} count={item.tokens[color]} />)}</div></span>)}</div>
-          </section>
-
-          <section className="market panel-card">
+          <section className="market panel-card" aria-label="개발 카드">
             {[3, 2, 1].map((tier) => <div className="market-row" key={tier}>
-              <button className={`deck deck-${tier}`} disabled={!canMainAction || player?.reserved.length >= 3 || !game.decks[tier].length} onClick={() => act({ type: "reserve", source: String(tier) })}><span>{tier}</span><b>{game.decks[tier].length}</b><small>비공개 예약</small></button>
+              <button className={`deck deck-${tier}`} disabled={!canMainAction || player?.reserved.length >= 3 || !game.decks[tier].length} onClick={() => act({ type: "reserve", source: String(tier) })} aria-label={`${tier}단계 더미 ${game.decks[tier].length}장 · 비공개 예약`}><span>{tier}</span><b>{game.decks[tier].length}</b><small>비공개 예약</small></button>
               <div className="cards-row">{game.board[tier].map((card) => <DevelopmentCard key={card.id} card={card} source={String(tier)} canAct={canMainAction} onBuy={paymentFor(player, card) ? () => buy(card, String(tier)) : null} onReserve={player?.reserved.length < 3 ? () => reserve(card, tier) : null} />)}</div>
             </div>)}
           </section>
         </div>
 
-        <aside className={`side-panel ${mobilePanel ? "open" : ""}`}>
-          <button className="mobile-panel-toggle" onClick={() => setMobilePanel((value) => !value)}><Users size={18} /> 플레이어 {mobilePanel ? <X /> : <ChevronRight />}</button>
-          <div className="room-mini"><span>ROOM</span><b>{roomCode}</b></div>
+        <aside className="side-panel" aria-label="플레이어 현황">
+          <div className="asset-legend"><span><i className="asset-card" /> 카드 보너스</span><span><i className="asset-token" /> 보석 토큰</span><span><Crown size={12} /> 귀족</span></div>
           <div className="players-stack">{game.players.map((item, index) => <PlayerPanel key={item.id} player={item} active={index === game.turn && game.status !== "finished"} me={item.id === me?.id} canAct={canMainAction} onBuyReserved={(card) => buy(card, "reserved")} />)}</div>
+          <ol className="game-log" aria-label="최근 행동">{game.log.slice(0, 3).map((line, index) => <li key={`${game.log.length}-${index}-${line}`}>{line}</li>)}</ol>
         </aside>
       </div>
-      {notice && <div className="toast">{notice}</div>}
       {game.pending?.type === "discard" && game.pending.playerId === me?.id && <DiscardModal player={player} count={game.pending.count} onConfirm={(tokens) => act({ type: "discard", tokens })} />}
       {game.pending?.type === "noble" && game.pending.playerId === me?.id && <NobleModal nobles={game.nobles.filter((noble) => game.pending.nobleIds.includes(noble.id))} onChoose={(nobleId) => act({ type: "noble", nobleId })} />}
       {game.status === "finished" && <WinnerModal game={game} me={me} onLeave={onLeave} />}
@@ -518,10 +638,13 @@ function WinnerModal({ game, me, onLeave }) {
 }
 
 function DemoGame({ onTutorial }) {
+  // ?demo=1 은 2인, ?demo=3·4 는 해당 인원으로 화면을 점검해요.
   const demoPlayers = useMemo(() => [
     { id: "demo-me", name: "준희", avatar: "chiikawa" },
     { id: "demo-friend", name: "보석친구", avatar: "hachiware" },
-  ], []);
+    { id: "demo-3", name: "우사기", avatar: "usagi" },
+    { id: "demo-4", name: "모몽가", avatar: "momonga" },
+  ].slice(0, Math.max(2, Number(new URLSearchParams(location.search).get("demo")) || 2)), []);
   const [demoGame, setDemoGame] = useState(() => createGame(demoPlayers, "DEMO1"));
   const demoMe = demoPlayers[0];
   const onAction = (action) => {
@@ -571,7 +694,7 @@ function SoloGame({ profile, difficulty, onLeave, onTutorial }) {
 }
 
 export default function App() {
-  const isDemo = new URLSearchParams(location.search).get("demo") === "1";
+  const isDemo = new URLSearchParams(location.search).has("demo");
   const [soloConfig, setSoloConfig] = useState(null);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const multiplayer = useMultiplayer();
@@ -583,6 +706,7 @@ export default function App() {
       {multiplayer.mode === "landing" && <Landing onHost={multiplayer.hostRoom} onJoin={multiplayer.joinRoom} onSolo={(profile, difficulty) => setSoloConfig({ profile, difficulty })} onTutorial={() => setTutorialOpen(true)} connecting={multiplayer.connectionState} />}
       {multiplayer.mode === "lobby" && <Lobby lobby={multiplayer.lobby} me={multiplayer.me} isHost={multiplayer.isHost} onStart={multiplayer.startGame} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} />}
       {multiplayer.mode === "game" && multiplayer.game && <GameBoard game={multiplayer.game} me={multiplayer.me} roomCode={multiplayer.roomCode} onAction={multiplayer.sendAction} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} />}
+      {multiplayer.connectionState === "reconnecting" && multiplayer.mode !== "landing" && <div className="reconnect-pill" role="status"><span /> 다시 연결하는 중…</div>}
       {multiplayer.error && <div className="global-error"><span>{multiplayer.error}</span><button onClick={() => multiplayer.setError("")} aria-label="오류 닫기"><X size={18} /></button></div>}
     </>
   );

@@ -47,10 +47,10 @@ test("튜토리얼과 랜딩이 현재 화면 폭을 넘지 않는다", async ({
   expect(box.width).toBeLessThanOrEqual(viewport.width + 1);
 });
 
-test("게임 카드 일러스트가 로드되고 중앙에 잘림 없이 표시된다", async ({ page }) => {
+test("게임 카드 일러스트가 로드되고 카드를 여백 없이 채운다", async ({ page }) => {
   await page.goto("/?demo=1");
   await page.waitForLoadState("networkidle");
-  const cards = page.locator(".market .dev-card .card-art img");
+  const cards = page.locator(".market .dev-card img.card-art");
   await expect(cards).toHaveCount(12);
   const results = await cards.evaluateAll((images) => images.map((image) => {
     const style = getComputedStyle(image);
@@ -63,7 +63,21 @@ test("게임 카드 일러스트가 로드되고 중앙에 잘림 없이 표시�
       inside: rect.left >= parent.left - 1 && rect.right <= parent.right + 1 && rect.top >= parent.top - 1 && rect.bottom <= parent.bottom + 1,
     };
   }));
-  expect(results.every((result) => result.loaded && result.fit === "contain" && result.position === "50% 50%" && result.inside)).toBeTruthy();
+  expect(results.every((result) => result.loaded && result.fit === "cover" && result.position === "50% 50%" && result.inside)).toBeTruthy();
+});
+
+test("아이패드 가로 화면에서 스크롤 없이 게임판 전체와 플레이어 보유 현황이 보인다", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 700 });
+  await page.goto("/?demo=1");
+  await page.waitForLoadState("networkidle");
+  expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1 && document.documentElement.scrollWidth <= innerWidth + 1)).toBeTruthy();
+  for (const selector of [".supply-section", ".nobles-section", ".market-row:last-child .dev-card:last-child", ".player-panel:last-child .asset-row"]) {
+    const box = await page.locator(selector).boundingBox();
+    expect(box.y + box.height, `${selector}가 화면 안에 있어야 합니다.`).toBeLessThanOrEqual(701);
+    expect(box.x + box.width).toBeLessThanOrEqual(1025);
+  }
+  await expect(page.locator(".player-panel")).toHaveCount(2);
+  await expect(page.locator(".player-panel .asset-card[aria-label*='카드']")).toHaveCount(10);
 });
 
 test("90장 카드 파일이 브라우저에서도 전부 로드된다", async ({ page }) => {

@@ -118,3 +118,11 @@ test("한 턴은 30초이며 시간 초과 시 합법 행동으로 자동 진행
   assert.match(next.log[0], /30초/);
   assert.ok(next.turnDeadline >= game.turnDeadline);
 });
+
+test("더미에서 예약한 카드만 비공개로 표시된다", () => {
+  let game = createGame(players(2), "SECRET");
+  game = applyAction(game, "p0", { type: "reserve", source: "2" });
+  game = applyAction(game, "p1", { type: "reserve", source: "1", cardId: game.board[1][0].id });
+  assert.equal(game.players[0].reserved[0].secret, true);
+  assert.equal(game.players[1].reserved[0].secret, undefined);
+});
