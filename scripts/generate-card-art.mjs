@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const outputDirectory = fileURLToPath(new URL("../public/assets/cards/generated/", import.meta.url));
 const stagingDirectory = await mkdtemp(join(tmpdir(), "splendor-card-art-"));
+const selectedIndexes = new Set(process.argv.slice(2).map(Number).filter(Number.isInteger));
 
 await mkdir(outputDirectory, { recursive: true });
 
@@ -22,6 +23,7 @@ const characters = [
 
 try {
   for (let index = 0; index < 90; index += 1) {
+    if (selectedIndexes.size && !selectedIndexes.has(index)) continue;
     const tier = index < 40 ? 1 : index < 70 ? 2 : 3;
     const sourceName = tier === 1
       ? backgrounds[index % backgrounds.length]
@@ -51,4 +53,4 @@ try {
   await rm(stagingDirectory, { recursive: true, force: true });
 }
 
-console.log("generated 90 unique JPEG card illustrations");
+console.log(selectedIndexes.size ? `regenerated ${selectedIndexes.size} selected card illustrations` : "generated 90 unique JPEG card illustrations");

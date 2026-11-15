@@ -21,7 +21,7 @@ const AVATARS = {
   hachiware: { label: "하치와레", image: "/assets/cards/hachiware.png", color: "#d9efff" },
   usagi: { label: "우사기", image: "/assets/cards/usagi.png", color: "#fff0b8" },
   kurimanju: { label: "쿠리만쥬", image: "/assets/cards/kurimanju.png", color: "#f1ddc8" },
-  ode: { label: "오데", image: "/assets/cards/ode.png", color: "#dcebd8" },
+  ode: { label: "오데", image: "/assets/cards/ode.png", color: "#fff3a8" },
   momonga: { label: "모몽가", image: "/assets/cards/momonga.png", color: "#eee2ff" },
 };
 const LEGACY_AVATARS = { ruby: "chiikawa", sapphire: "hachiware", emerald: "usagi", diamond: "momonga" };
