@@ -214,10 +214,11 @@ function refillRow(deck, row) {
   while (row.length < 4 && deck.length) row.push(deck.pop());
 }
 
-export function createGame(players, roomCode = "JEWEL") {
+// seed를 바꾸면 같은 방에서도 카드와 귀족이 새로 섞여요(다시하기).
+export function createGame(players, roomCode = "JEWEL", seed = roomCode) {
   if (players.length < 2 || players.length > 4) throw new Error("게임은 2~4명이 필요해요.");
   const tokenCount = players.length === 2 ? 4 : players.length === 3 ? 5 : 7;
-  const decks = { 1: createDeck(1, roomCode), 2: createDeck(2, roomCode), 3: createDeck(3, roomCode) };
+  const decks = { 1: createDeck(1, seed), 2: createDeck(2, seed), 3: createDeck(3, seed) };
   const board = { 1: [], 2: [], 3: [] };
   [1, 2, 3].forEach((tier) => refillRow(decks[tier], board[tier]));
   return {
@@ -227,7 +228,7 @@ export function createGame(players, roomCode = "JEWEL") {
     supply: { ...Object.fromEntries(COLORS.map((color) => [color, tokenCount])), gold: 5 },
     decks,
     board,
-    nobles: createNobles(roomCode).slice(0, players.length + 1),
+    nobles: createNobles(seed).slice(0, players.length + 1),
     turn: 0,
     round: 1,
     finalRound: false,

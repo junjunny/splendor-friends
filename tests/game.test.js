@@ -139,3 +139,11 @@ test("플레이어별 화면은 더미 내용과 남이 더미에서 예약한 �
   assert.ok(theirs.decks[3].every((card) => card === null));
   assert.ok(JSON.stringify(theirs).length < JSON.stringify(game).length / 2);
 });
+
+test("다시하기는 같은 방 코드로도 카드를 새로 섞는다", () => {
+  const first = createGame(players(2), "AGAIN");
+  const second = createGame(players(2), "AGAIN", "AGAIN-2");
+  assert.equal(second.roomCode, "AGAIN");
+  assert.notDeepEqual(first.board[1].map((card) => card.id), second.board[1].map((card) => card.id));
+  assert.equal(second.players.every((player) => player.cards.length === 0 && tokenTotal(player) === 0), true);
+});

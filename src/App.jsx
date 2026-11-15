@@ -368,6 +368,15 @@ function useMultiplayer() {
     setMode("game");
   }, [publishGame, publishLobby]);
 
+  // 다시하기: 같은 방·같은 친구들로 새 판을 시작해요. 시작 순서는 한 칸씩 돌아가요.
+  const rematch = useCallback(() => {
+    const current = lobbyRef.current;
+    if (!isHostRef.current || !current || gameRef.current?.status !== "finished") return;
+    const players = [...current.players.slice(1), current.players[0]];
+    publishLobby({ ...current, players });
+    publishGame(createGame(players, current.roomCode, `${current.roomCode}-${Date.now()}`));
+  }, [publishGame, publishLobby]);
+
   const sendAction = useCallback((action) => {
     const playerId = profileRef.current?.id;
     if (!playerId) return;
@@ -393,7 +402,7 @@ function useMultiplayer() {
   return {
     mode, roomCode, lobby, game, error, setError, connectionState, connectStatus,
     me: profileRef.current, isHost: isHostRef.current,
-    hostRoom, joinRoom, resumeSaved, startGame, sendAction, leave, retryNow,
+    hostRoom, joinRoom, resumeSaved, startGame, rematch, sendAction, leave, retryNow,
   };
 }
 
@@ -581,9 +590,10 @@ function DevelopmentCard({ card, canAct, onBuy, onReserve, source }) {
   const affordable = canAct && Boolean(onBuy);
   const meta = COLOR_META[card.bonus];
   return (
-    <article className={`dev-card bonus-${card.bonus} ${canAct ? "is-actionable" : ""}`} style={{ "--bonus-color": meta.hex }}>
+    <article className={`dev-card bonus-${card.bonus} ${canAct ? "is-actionable" : ""} ${onBuy ? "can-afford" : ""}`} style={{ "--bonus-color": meta.hex }}>
       <img className="card-art" src={`/assets/cards/${card.art}`} alt={`먼작귀 ${card.tier}단계 카드 일러스트 ${card.artVariant + 1}`} loading="eager" />
       <div className="card-top"><strong>{card.points || ""}</strong><span className={`card-bonus shape-${meta.shape}`} role="img" aria-label={`${meta.label} 보너스`} title={`${meta.label} 영구 할인`} /></div>
+      {onBuy && !canAct && <span className="afford-badge" role="img" aria-label="지금 가진 보석으로 살 수 있는 카드"><Check size={12} /></span>}
       <div className="cost-list">
         {COLORS.filter((color) => card.cost[color] > 0).map((color) => <MiniGem key={color} color={color} count={card.cost[color]} />)}
       </div>
@@ -595,9 +605,14 @@ function DevelopmentCard({ card, canAct, onBuy, onReserve, source }) {
   );
 }
 
-function NobleCard({ noble, selectable, onClick }) {
+function NobleCard({ noble, selectable, onClick, bonuses }) {
+  const costs = Object.entries(noble.cost);
+  const ready = bonuses && costs.every(([color, count]) => bonuses[color] >= count);
   return (
-    <button className={`noble-card ${selectable ? "selectable" : ""}`} onClick={onClick} disabled={!selectable} aria-label={`귀족 3점 · ${Object.entries(noble.cost).map(([color, count]) => `${COLOR_META[color].label} 카드 ${count}장`).join(", ")}`}><span><Crown size={15} /><strong>3</strong></span><div>{Object.entries(noble.cost).map(([color, count]) => <MiniGem key={color} color={color} count={count} />)}</div></button>
+    <button className={`noble-card ${selectable ? "selectable" : ""} ${ready ? "ready" : ""}`} onClick={onClick} disabled={!selectable} aria-label={`귀족 3점 · ${costs.map(([color, count]) => `${COLOR_META[color].label} 카드 ${count}장${bonuses ? ` (내 카드 ${Math.min(bonuses[color], count)}장)` : ""}`).join(", ")}`}>
+      <span><Crown size={15} /><strong>3</strong></span>
+      <div>{costs.map(([color, count]) => <span key={color} className={`noble-need ${bonuses && bonuses[color] >= count ? "met" : ""}`}><MiniGem color={color} count={count} />{bonuses && <small>{Math.min(bonuses[color], count)}/{count}</small>}</span>)}</div>
+    </button>
   );
 }
 
@@ -621,7 +636,8 @@ function PlayerPanel({ player, active, me, canAct, onBuyReserved }) {
         <strong>{player.name}{me ? " · 나" : ""}{player.isBot && <em>{BOT_LEVELS[player.difficulty]?.label || "BOT"}</em>}</strong>
         {active && <i>차례</i>}
         {player.nobles.length > 0 && <span className="noble-owned" title={`귀족 ${player.nobles.length}명 · ${player.nobles.length * 3}점`}><Crown size={14} />{player.nobles.length}</span>}
-        <b className="player-score" aria-label={`${playerScore(player)}점`}>{playerScore(player)}</b>
+        <small className={`token-sum ${tokenTotal(player) >= 9 ? "near-limit" : ""}`} aria-label={`보석 ${tokenTotal(player)}개 보유, 최대 10개`}><Gem size={11} />{tokenTotal(player)}/10</small>
+        <b className="player-score" key={playerScore(player)} aria-label={`${playerScore(player)}점`}>{playerScore(player)}</b>
       </div>
       <div className="asset-row">
         {COLORS.map((color) => (
@@ -631,10 +647,9 @@ function PlayerPanel({ player, active, me, canAct, onBuyReserved }) {
           </div>
         ))}
         <div className="asset-col" title={`골드 조커 ${player.tokens.gold}개`}>
-          <span className="asset-total" aria-label={`개발 카드 ${player.cards.length}장`}>{player.cards.length}<small>장</small></span>
+          <span className="asset-total" aria-label={`개발 카드 모두 ${player.cards.length}장`} title="산 카드 합계">{player.cards.length}<small>장</small></span>
           <span className={`asset-token mini-gold ${player.tokens.gold ? "" : "is-zero"}`} aria-label={`골드 조커 ${player.tokens.gold}개`}>{player.tokens.gold}</span>
         </div>
-        <div className="asset-col asset-sum"><small>보석</small><b>{tokenTotal(player)}/10</b></div>
       </div>
       {player.reserved.length > 0 && <div className="reserved-row" aria-label={`예약 카드 ${player.reserved.length}장`}>
         {player.reserved.map((card) => <ReservedChip key={card.id} card={card} hidden={!me && card.secret} mine={me} canBuy={me && canAct && Boolean(paymentFor(player, card))} onBuy={() => onBuyReserved(card)} />)}
@@ -643,7 +658,7 @@ function PlayerPanel({ player, active, me, canAct, onBuyReserved }) {
   );
 }
 
-function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial }) {
+function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial, onRematch = null, rematchNote = "" }) {
   const [selectedTokens, setSelectedTokens] = useState([]);
   const [timeLeft, setTimeLeft] = useState(() => Math.max(0, Math.ceil((game.turnDeadline - Date.now()) / 1000)));
   const player = game.players.find((item) => item.id === me?.id);
@@ -651,6 +666,18 @@ function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial }) {
   const canMainAction = isMyTurn && !game.pending;
 
   useEffect(() => { setSelectedTokens([]); }, [game.turn, game.round]);
+  // 내 차례가 오면 폰이 살짝 진동해요.
+  useEffect(() => { if (isMyTurn && navigator.userActivation?.hasBeenActive) navigator.vibrate?.(120); }, [isMyTurn]);
+  // 게임 중에는 화면이 꺼지지 않게 해요(화면이 꺼지면 연결도 끊기기 쉬워요).
+  useEffect(() => {
+    let lock = null;
+    const acquire = () => { if (document.visibilityState === "visible") navigator.wakeLock?.request("screen").then((value) => { lock = value; }).catch(() => {}); };
+    acquire();
+    document.addEventListener("visibilitychange", acquire);
+    return () => { document.removeEventListener("visibilitychange", acquire); lock?.release().catch(() => {}); };
+  }, []);
+  const myBonuses = player ? playerBonuses(player) : null;
+  const confirmLeave = () => { if (game.status !== "playing" || window.confirm("게임에서 나갈까요? 진행 중인 판을 떠나게 돼요.")) onLeave(); };
   useEffect(() => {
     const update = () => setTimeLeft(Math.max(0, Math.ceil((game.turnDeadline - Date.now()) / 1000)));
     update();
@@ -677,8 +704,9 @@ function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial }) {
     <main className="game-shell">
       <header className="game-header">
         <div className="brand"><span className="brand-gem">◆</span><span>보석친구</span><small className="room-chip">{roomCode}</small></div>
-        <div className="turn-banner" aria-live="polite"><Avatar avatar={game.players[game.turn]?.avatar} size="sm" /><span>{game.status === "finished" ? "게임이 끝났어요" : isMyTurn ? "내 차례예요!" : `${game.players[game.turn]?.name}님의 차례`}</span><small>ROUND {game.round}</small><b className={timeLeft <= 10 ? "urgent" : ""}><Clock3 /> {game.status === "finished" ? "--" : timeLeft}</b></div>
-        <div className="header-actions"><button onClick={onTutorial} aria-label="튜토리얼 열기"><BookOpenCheck /></button><button onClick={() => document.getElementById("rules")?.showModal()} aria-label="규칙 요약 열기"><HelpCircle /></button><button onClick={onLeave} aria-label="게임 나가기"><LogOut /></button></div>
+        <div className={`turn-banner ${isMyTurn ? "mine" : ""}`} aria-live="polite"><Avatar avatar={game.players[game.turn]?.avatar} size="sm" /><span>{game.status === "finished" ? "게임이 끝났어요" : isMyTurn ? "내 차례예요!" : `${game.players[game.turn]?.name}님의 차례`}</span>{game.finalRound && game.status === "playing" ? <small className="final-chip">마지막 라운드!</small> : <small>ROUND {game.round}</small>}<b className={timeLeft <= 10 ? "urgent" : ""}><Clock3 /> {game.status === "finished" ? "--" : timeLeft}</b></div>
+        <div className="header-actions"><button onClick={onTutorial} aria-label="튜토리얼 열기"><BookOpenCheck /></button><button onClick={() => document.getElementById("rules")?.showModal()} aria-label="규칙 요약 열기"><HelpCircle /></button><button onClick={confirmLeave} aria-label="게임 나가기"><LogOut /></button></div>
+        {game.status === "playing" && <div className={`turn-timer ${timeLeft <= 10 ? "urgent" : ""}`} aria-hidden="true"><span style={{ width: `${Math.min(100, (timeLeft / 30) * 100)}%` }} /></div>}
       </header>
       <div className="game-layout">
         <div className="board-area">
@@ -689,7 +717,7 @@ function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial }) {
               </div>
               <div className="token-row">{ALL_TOKENS.map((color) => <Token key={color} color={color} count={game.supply[color]} selected={selectedTokens.filter((item) => item === color).length} onClick={color !== "gold" && canMainAction ? () => selectToken(color) : null} />)}</div>
             </section>
-            <section className="nobles-section panel-card"><div className="section-title"><span>귀족 광장</span><small>카드 조건 달성 시 3점</small></div><div className="nobles-row">{game.nobles.length ? game.nobles.map((noble) => <NobleCard key={noble.id} noble={noble} />) : <small className="nobles-empty">모든 귀족이 떠났어요</small>}</div></section>
+            <section className="nobles-section panel-card"><div className="section-title"><span>귀족 광장</span><small>카드 조건 달성 시 3점</small></div><div className="nobles-row">{game.nobles.length ? game.nobles.map((noble) => <NobleCard key={noble.id} noble={noble} bonuses={myBonuses} />) : <small className="nobles-empty">모든 귀족이 떠났어요</small>}</div></section>
           </div>
 
           <section className="market panel-card" aria-label="개발 카드">
@@ -708,7 +736,7 @@ function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial }) {
       </div>
       {game.pending?.type === "discard" && game.pending.playerId === me?.id && <DiscardModal player={player} count={game.pending.count} onConfirm={(tokens) => act({ type: "discard", tokens })} />}
       {game.pending?.type === "noble" && game.pending.playerId === me?.id && <NobleModal nobles={game.nobles.filter((noble) => game.pending.nobleIds.includes(noble.id))} onChoose={(nobleId) => act({ type: "noble", nobleId })} />}
-      {game.status === "finished" && <WinnerModal game={game} me={me} onLeave={onLeave} />}
+      {game.status === "finished" && <WinnerModal game={game} me={me} onLeave={onLeave} onRematch={onRematch} rematchNote={rematchNote} />}
       <RulesDialog />
     </main>
   );
@@ -725,10 +753,22 @@ function NobleModal({ nobles, onChoose }) {
   return <div className="modal-backdrop"><div className="choice-modal"><div className="eyebrow"><Crown size={15} /> 귀족 방문</div><h2>맞이할 귀족을 골라주세요</h2><p>한 턴에는 귀족 한 명만 방문할 수 있어요.</p><div className="noble-choice">{nobles.map((noble) => <NobleCard key={noble.id} noble={noble} selectable onClick={() => onChoose(noble.id)} />)}</div></div></div>;
 }
 
-function WinnerModal({ game, me, onLeave }) {
+function WinnerModal({ game, me, onLeave, onRematch, rematchNote }) {
   const winners = game.players.filter((player) => game.winnerIds.includes(player.id));
   const won = game.winnerIds.includes(me?.id);
-  return <div className="modal-backdrop celebration"><div className="winner-modal"><div className="winner-crown">👑</div><span>{won ? "내가 해냈어요!" : "멋진 승부였어요!"}</span><h1>{winners.map((player) => player.name).join(", ")} 승리</h1><p>동점일 때는 구매한 개발 카드가 더 적은 플레이어가 승리해요.</p><div className="scoreboard">{[...game.players].sort((a, b) => playerScore(b) - playerScore(a)).map((player, index) => <div key={player.id}><b>{index + 1}</b><Avatar avatar={player.avatar} /><span>{player.name}</span><strong>{playerScore(player)}점</strong><small>카드 {player.cards.length}장</small></div>)}</div><button className="primary-button" onClick={onLeave}>랜딩으로 돌아가기</button></div></div>;
+  const ranked = [...game.players].sort((a, b) => playerScore(b) - playerScore(a) || a.cards.length - b.cards.length);
+  return (
+    <div className="modal-backdrop celebration"><div className="winner-modal" role="dialog" aria-modal="true" aria-label="게임 결과">
+      <div className="winner-crown">👑</div>
+      <span>{won ? "내가 해냈어요!" : "멋진 승부였어요!"}</span>
+      <h1>{winners.map((player) => player.name).join(", ")} 승리</h1>
+      <p>동점일 때는 구매한 개발 카드가 더 적은 플레이어가 승리해요.</p>
+      <div className="scoreboard">{ranked.map((player, index) => <div key={player.id} className={game.winnerIds.includes(player.id) ? "is-winner" : ""}><b>{index + 1}</b><Avatar avatar={player.avatar} /><span>{player.name}{player.id === me?.id ? " · 나" : ""}</span><strong>{playerScore(player)}점</strong><small>카드 {player.cards.length}장 · 귀족 {player.nobles.length}</small></div>)}</div>
+      {onRematch && <button className="primary-button" onClick={onRematch}><RotateCcw size={18} /> 같은 방에서 다시하기</button>}
+      {!onRematch && rematchNote && <div className="waiting-pill"><span /> {rematchNote}</div>}
+      <button className="text-button winner-leave" onClick={onLeave}><LogOut size={16} /> 나가기</button>
+    </div></div>
+  );
 }
 
 function DemoGame({ onTutorial }) {
@@ -784,7 +824,8 @@ function SoloGame({ profile, difficulty, onLeave, onTutorial }) {
     try { setError(""); setGame((current) => applyAction(current, profile.id, action)); }
     catch (actionError) { setError(actionError instanceof Error ? actionError.message : "행동을 처리하지 못했어요."); }
   };
-  return <><GameBoard game={game} me={profile} roomCode={`SOLO · ${BOT_LEVELS[difficulty].label}`} onAction={onAction} onLeave={onLeave} onTutorial={onTutorial} />{error && <div className="global-error"><span>{error}</span><button onClick={() => setError("")} aria-label="오류 닫기"><X size={18} /></button></div>}</>;
+  const rematch = () => setGame((current) => createGame([...current.players].reverse().map((player) => (player.id === bot.id ? bot : profile)), current.roomCode, `${current.roomCode}-${Date.now()}`));
+  return <><GameBoard game={game} me={profile} roomCode={`SOLO · ${BOT_LEVELS[difficulty].label}`} onAction={onAction} onLeave={onLeave} onTutorial={onTutorial} onRematch={rematch} />{error && <div className="global-error"><span>{error}</span><button onClick={() => setError("")} aria-label="오류 닫기"><X size={18} /></button></div>}</>;
 }
 
 export default function App() {
@@ -799,7 +840,7 @@ export default function App() {
     <>
       {multiplayer.mode === "landing" && <Landing onHost={multiplayer.hostRoom} onJoin={multiplayer.joinRoom} onSolo={(profile, difficulty) => setSoloConfig({ profile, difficulty })} onTutorial={() => setTutorialOpen(true)} onResume={multiplayer.resumeSaved} onCancel={multiplayer.leave} connecting={multiplayer.connectionState} status={multiplayer.connectStatus} />}
       {multiplayer.mode === "lobby" && <Lobby lobby={multiplayer.lobby} me={multiplayer.me} isHost={multiplayer.isHost} onStart={multiplayer.startGame} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} />}
-      {multiplayer.mode === "game" && multiplayer.game && <GameBoard game={multiplayer.game} me={multiplayer.me} roomCode={multiplayer.roomCode} onAction={multiplayer.sendAction} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} />}
+      {multiplayer.mode === "game" && multiplayer.game && <GameBoard game={multiplayer.game} me={multiplayer.me} roomCode={multiplayer.roomCode} onAction={multiplayer.sendAction} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} onRematch={multiplayer.isHost ? multiplayer.rematch : null} rematchNote="방장이 다시하기를 누르면 바로 새 판이 시작돼요" />}
       {multiplayer.connectionState === "reconnecting" && multiplayer.mode !== "landing" && <ReconnectPill onRetry={multiplayer.retryNow} onLeave={multiplayer.leave} />}
       {multiplayer.error && <div className="global-error"><span>{multiplayer.error}</span><button onClick={() => multiplayer.setError("")} aria-label="오류 닫기"><X size={18} /></button></div>}
     </>
