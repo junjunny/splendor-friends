@@ -508,7 +508,7 @@ function GameBoard({ game, me, roomCode, onAction, onLeave }) {
 
           <section className="activity-feed panel-card">
             <div className="section-title"><div><span>실시간 플레이</span><small>상대의 점수와 최근 행동</small></div><b className="activity-live">LIVE</b></div>
-            <div className="score-strip">{game.players.map((item) => <span key={item.id} className={item.id === me?.id ? "is-me" : ""}><Avatar avatar={item.avatar} size="sm" /><b>{item.name}</b><strong>{playerScore(item)}점</strong></span>)}</div>
+            <div className="score-strip">{game.players.map((item) => <span key={item.id} className={item.id === me?.id ? "is-me" : ""}><Avatar avatar={item.avatar} size="sm" /><div className="score-player"><b>{item.name}</b><small>카드 {item.cards.length}장 · 예약 {item.reserved.length}</small></div><strong>{playerScore(item)}점</strong><div className="score-assets">{ALL_TOKENS.filter((color) => item.tokens[color] > 0).map((color) => <MiniGem key={color} color={color} count={item.tokens[color]} />)}</div></span>)}</div>
             <div className="activity-list">{activities.slice(0, 5).map((item, index) => <ActivityEvent key={`${item.id || item.text}-${index}`} event={item} me={me} players={game.players} />)}</div>
           </section>
 
