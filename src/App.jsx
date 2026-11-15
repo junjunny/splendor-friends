@@ -15,6 +15,7 @@ import {
 } from "./game.js";
 import { BOT_LEVELS, chooseBotAction, playTimedTurn } from "./bot.js";
 import { openGuestLink, openHostLink } from "./net.js";
+import { EMOTES, mascotLine, reactionFor } from "./mascots.js";
 import TutorialDialog from "./Tutorial.jsx";
 
 const AVATARS = {
@@ -55,6 +56,8 @@ function useMultiplayer() {
   const [error, setError] = useState("");
   const [connectionState, setConnectionState] = useState("idle");
   const [connectStatus, setConnectStatus] = useState("");
+  const [emote, setEmote] = useState(null);
+  const emoteAtRef = useRef(new Map());
   const linkRef = useRef(null);
   const profileRef = useRef(null);
   const isHostRef = useRef(false);
@@ -121,6 +124,16 @@ function useMultiplayer() {
     }
   }, [publishGame, sendTo]);
 
+  // 감정표현: 방장이 받아서 모두에게 전해요. 연타는 0.8초에 한 번으로 막아요.
+  const emitEmote = useCallback((playerId, key) => {
+    if (!EMOTES.some((item) => item.key === key)) return;
+    const now = Date.now();
+    if (now - (emoteAtRef.current.get(playerId) || 0) < 800) return;
+    emoteAtRef.current.set(playerId, now);
+    setEmote({ id: now, playerId, key });
+    guestIds().filter((id) => id !== playerId).forEach((id) => linkRef.current?.sendTo?.(id, { type: "emote", playerId, key }));
+  }, []);
+
   const onGuestMessage = useCallback((message) => {
     if (!isHostRef.current || !message || typeof message !== "object") return;
     const current = lobbyRef.current;
@@ -150,11 +163,12 @@ function useMultiplayer() {
     if (!known) return;
     if (message.type === "action") runAction(id, message.action, id);
     else if (message.type === "sync") sendStateTo(id);
+    else if (message.type === "emote") emitEmote(id, message.emote);
     else if (message.type === "leave" && current.status === "waiting") {
       keysRef.current.delete(id);
       publishLobby({ ...current, players: current.players.filter((player) => player.id !== id) });
     }
-  }, [publishLobby, runAction, sendStateTo, sendTo]);
+  }, [emitEmote, publishLobby, runAction, sendStateTo, sendTo]);
 
   const hostRoom = useCallback(async (profile, resume = null) => {
     closeLink();
@@ -238,6 +252,7 @@ function useMultiplayer() {
           if (message.fatal) { sessionRef.current = null; closeLink(); setConnectionState("error"); setConnectStatus(""); if (!gameRef.current) setMode("landing"); }
           return;
         }
+        if (message.type === "emote") { setEmote({ id: Date.now(), playerId: message.playerId, key: message.key }); return; }
         if (message.type !== "lobby" && message.type !== "game") return;
         guestRevRef.current = message.rev;
         if (!joinedRef.current || sessionRef.current?.code !== code) {
@@ -384,6 +399,14 @@ function useMultiplayer() {
     else if (!linkRef.current?.sendUp?.({ type: "action", action })) setError("다시 연결하는 중이에요. 잠시 후 눌러주세요.");
   }, [runAction]);
 
+  const sendEmote = useCallback((key) => {
+    const playerId = profileRef.current?.id;
+    if (!playerId) return;
+    if (isHostRef.current) { emitEmote(playerId, key); return; }
+    setEmote({ id: Date.now(), playerId, key });
+    linkRef.current?.sendUp?.({ type: "emote", emote: key }); // key는 본인 확인용 이름이라 emote로 보내요.
+  }, [emitEmote]);
+
   const leave = useCallback(() => {
     if (!isHostRef.current) linkRef.current?.sendUp?.({ type: "leave" });
     sessionRef.current = null;
@@ -400,7 +423,7 @@ function useMultiplayer() {
   }, [closeLink, setGameState, setLobbyState]);
 
   return {
-    mode, roomCode, lobby, game, error, setError, connectionState, connectStatus,
+    mode, roomCode, lobby, game, error, setError, connectionState, connectStatus, emote, sendEmote,
     me: profileRef.current, isHost: isHostRef.current,
     hostRoom, joinRoom, resumeSaved, startGame, rematch, sendAction, leave, retryNow,
   };
@@ -627,10 +650,11 @@ function ReservedChip({ card, hidden, mine, canBuy, onBuy }) {
     : <span className="reserved-chip" role="img" aria-label={`예약된 ${label}`}>{body}</span>;
 }
 
-function PlayerPanel({ player, active, me, canAct, onBuyReserved }) {
+function PlayerPanel({ player, active, me, canAct, onBuyReserved, bubble }) {
   const bonuses = playerBonuses(player);
   return (
     <section className={`player-panel ${active ? "active" : ""} ${me ? "me" : ""}`} aria-label={`${player.name} 현황`}>
+      {bubble && <p className="speech" key={bubble.id} role="status"><b>{bubble.emoji}</b>{bubble.text}</p>}
       <div className="player-head">
         <Avatar avatar={player.avatar} size="sm" />
         <strong>{player.name}{me ? " · 나" : ""}{player.isBot && <em>{BOT_LEVELS[player.difficulty]?.label || "BOT"}</em>}</strong>
@@ -658,7 +682,10 @@ function PlayerPanel({ player, active, me, canAct, onBuyReserved }) {
   );
 }
 
-function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial, onRematch = null, rematchNote = "" }) {
+function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial, onRematch = null, rematchNote = "", emote = null, onEmote = null }) {
+  const [bubbles, setBubbles] = useState({});
+  const seenSeqRef = useRef(game.seq || 0);
+  const seenEmoteRef = useRef(emote?.id);
   const [selectedTokens, setSelectedTokens] = useState([]);
   const [timeLeft, setTimeLeft] = useState(() => Math.max(0, Math.ceil((game.turnDeadline - Date.now()) / 1000)));
   const player = game.players.find((item) => item.id === me?.id);
@@ -677,6 +704,28 @@ function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial, onRematc
     return () => { document.removeEventListener("visibilitychange", acquire); lock?.release().catch(() => {}); };
   }, []);
   const myBonuses = player ? playerBonuses(player) : null;
+  // 말풍선: 카드를 사거나 귀족이 오면 그 친구가 한마디 하고, 감정표현을 보내면 그 말이 떠요.
+  const say = (playerId, key, emoji = "") => {
+    const speaker = game.players.find((item) => item.id === playerId);
+    const text = speaker && mascotLine(speaker.avatar, key);
+    if (!text) return;
+    const id = `${Date.now()}-${key}`;
+    setBubbles((current) => ({ ...current, [playerId]: { id, text, emoji } }));
+    setTimeout(() => setBubbles((current) => (current[playerId]?.id === id ? { ...current, [playerId]: null } : current)), 2600);
+  };
+  useEffect(() => {
+    const seen = seenSeqRef.current;
+    seenSeqRef.current = game.seq || 0;
+    if ((game.seq || 0) < seen) return; // 다시하기로 새 판이 시작됐어요.
+    [...(game.activity || [])].reverse().filter((entry) => entry.seq > seen).forEach((entry) => { const key = reactionFor(entry); if (key) say(entry.playerId, key); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.seq]);
+  useEffect(() => {
+    if (!emote || emote.id === seenEmoteRef.current) return;
+    seenEmoteRef.current = emote.id;
+    say(emote.playerId, emote.key, EMOTES.find((item) => item.key === emote.key)?.emoji);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [emote]);
   const confirmLeave = () => { if (game.status !== "playing" || window.confirm("게임에서 나갈까요? 진행 중인 판을 떠나게 돼요.")) onLeave(); };
   useEffect(() => {
     const update = () => setTimeLeft(Math.max(0, Math.ceil((game.turnDeadline - Date.now()) / 1000)));
@@ -730,8 +779,9 @@ function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial, onRematc
 
         <aside className="side-panel" aria-label="플레이어 현황">
           <div className="asset-legend"><span><i className="asset-card" /> 카드 보너스</span><span><i className="asset-token" /> 보석 토큰</span><span><Crown size={12} /> 귀족</span></div>
-          <div className="players-stack">{game.players.map((item, index) => <PlayerPanel key={item.id} player={item} active={index === game.turn && game.status !== "finished"} me={item.id === me?.id} canAct={canMainAction} onBuyReserved={(card) => buy(card, "reserved")} />)}</div>
-          <ol className="game-log" aria-label="최근 행동">{game.log.slice(0, 3).map((line, index) => <li key={`${game.log.length}-${index}-${line}`}>{line}</li>)}</ol>
+          <div className="players-stack">{game.players.map((item, index) => <PlayerPanel key={item.id} player={item} active={index === game.turn && game.status !== "finished"} me={item.id === me?.id} canAct={canMainAction} onBuyReserved={(card) => buy(card, "reserved")} bubble={bubbles[item.id]} />)}</div>
+          {onEmote && player && <div className="emote-bar" role="group" aria-label="감정표현 보내기">{EMOTES.map((item) => <button key={item.key} type="button" onClick={() => onEmote(item.key)} aria-label={`${item.label}: ${mascotLine(player.avatar, item.key)}`} title={mascotLine(player.avatar, item.key)}>{item.emoji}</button>)}</div>}
+          <ol className="game-log" aria-label="최근 행동">{game.log.slice(0, 2).map((line, index) => <li key={`${game.log.length}-${index}-${line}`}>{line}</li>)}</ol>
         </aside>
       </div>
       {game.pending?.type === "discard" && game.pending.playerId === me?.id && <DiscardModal player={player} count={game.pending.count} onConfirm={(tokens) => act({ type: "discard", tokens })} />}
@@ -759,7 +809,9 @@ function WinnerModal({ game, me, onLeave, onRematch, rematchNote }) {
   const ranked = [...game.players].sort((a, b) => playerScore(b) - playerScore(a) || a.cards.length - b.cards.length);
   return (
     <div className="modal-backdrop celebration"><div className="winner-modal" role="dialog" aria-modal="true" aria-label="게임 결과">
-      <div className="winner-crown">👑</div>
+      <div className="confetti" aria-hidden="true">{Array.from({ length: 28 }, (_, index) => <i key={index} className={`shape-${["diamond", "hexagon", "octagon", "ruby", "star"][index % 5]}`} style={{ "--x": `${(index * 37) % 100}%`, "--d": `${(index % 7) * 0.35}s`, "--t": `${2.6 + (index % 5) * 0.5}s`, "--c": ["#f6f1e7", "#2f80ed", "#27ae60", "#eb3b5a", "#f2b705"][index % 5], "--s": `${12 + (index % 4) * 5}px` }} />)}</div>
+      <div className="winner-stage">{winners.map((player) => <span key={player.id}><Avatar avatar={player.avatar} size="xl" /></span>)}<div className="winner-crown">👑</div></div>
+      {winners[0] && <p className="winner-says">“{mascotLine(winners[0].avatar, "win")}”</p>}
       <span>{won ? "내가 해냈어요!" : "멋진 승부였어요!"}</span>
       <h1>{winners.map((player) => player.name).join(", ")} 승리</h1>
       <p>동점일 때는 구매한 개발 카드가 더 적은 플레이어가 승리해요.</p>
@@ -780,18 +832,26 @@ function DemoGame({ onTutorial }) {
     { id: "demo-4", name: "모몽가", avatar: "momonga" },
   ].slice(0, Math.max(2, Number(new URLSearchParams(location.search).get("demo")) || 2)), []);
   const [demoGame, setDemoGame] = useState(() => createGame(demoPlayers, "DEMO1"));
+  const [emote, setEmote] = useState(null);
   const demoMe = demoPlayers[0];
   const onAction = (action) => {
     try { setDemoGame((current) => applyAction(current, demoMe.id, action)); }
     catch { /* QA용 데모에서는 잘못된 동작을 그대로 무시해요. */ }
   };
-  return <GameBoard game={demoGame} me={demoMe} roomCode="DEMO1" onAction={onAction} onLeave={() => { location.href = location.pathname; }} onTutorial={onTutorial} />;
+  return <GameBoard game={demoGame} me={demoMe} roomCode="DEMO1" onAction={onAction} onLeave={() => { location.href = location.pathname; }} onTutorial={onTutorial} emote={emote} onEmote={(key) => setEmote({ id: Date.now(), playerId: demoMe.id, key })} />;
 }
 
 function SoloGame({ profile, difficulty, onLeave, onTutorial }) {
   const bot = useMemo(() => ({ id: `bot-${difficulty}`, name: "보석콩 BOT", avatar: "momonga", isBot: true, difficulty }), [difficulty]);
   const [game, setGame] = useState(() => createGame([profile, bot], `SOLO-${difficulty.toUpperCase()}`));
   const [error, setError] = useState("");
+  const [emote, setEmote] = useState(null);
+  // 봇도 가끔 감정표현에 답해줘요.
+  const onEmote = (key) => {
+    setEmote({ id: Date.now(), playerId: profile.id, key });
+    const reply = { hello: "hello", nice: "happy", gg: "gg", sorry: "nice", hurry: "think" }[key];
+    if (reply) setTimeout(() => setEmote({ id: Date.now(), playerId: bot.id, key: reply }), 900);
+  };
 
   useEffect(() => {
     const current = game.players[game.turn];
@@ -825,7 +885,7 @@ function SoloGame({ profile, difficulty, onLeave, onTutorial }) {
     catch (actionError) { setError(actionError instanceof Error ? actionError.message : "행동을 처리하지 못했어요."); }
   };
   const rematch = () => setGame((current) => createGame([...current.players].reverse().map((player) => (player.id === bot.id ? bot : profile)), current.roomCode, `${current.roomCode}-${Date.now()}`));
-  return <><GameBoard game={game} me={profile} roomCode={`SOLO · ${BOT_LEVELS[difficulty].label}`} onAction={onAction} onLeave={onLeave} onTutorial={onTutorial} onRematch={rematch} />{error && <div className="global-error"><span>{error}</span><button onClick={() => setError("")} aria-label="오류 닫기"><X size={18} /></button></div>}</>;
+  return <><GameBoard game={game} me={profile} roomCode={`SOLO · ${BOT_LEVELS[difficulty].label}`} onAction={onAction} onLeave={onLeave} onTutorial={onTutorial} onRematch={rematch} emote={emote} onEmote={onEmote} />{error && <div className="global-error"><span>{error}</span><button onClick={() => setError("")} aria-label="오류 닫기"><X size={18} /></button></div>}</>;
 }
 
 export default function App() {
@@ -840,7 +900,7 @@ export default function App() {
     <>
       {multiplayer.mode === "landing" && <Landing onHost={multiplayer.hostRoom} onJoin={multiplayer.joinRoom} onSolo={(profile, difficulty) => setSoloConfig({ profile, difficulty })} onTutorial={() => setTutorialOpen(true)} onResume={multiplayer.resumeSaved} onCancel={multiplayer.leave} connecting={multiplayer.connectionState} status={multiplayer.connectStatus} />}
       {multiplayer.mode === "lobby" && <Lobby lobby={multiplayer.lobby} me={multiplayer.me} isHost={multiplayer.isHost} onStart={multiplayer.startGame} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} />}
-      {multiplayer.mode === "game" && multiplayer.game && <GameBoard game={multiplayer.game} me={multiplayer.me} roomCode={multiplayer.roomCode} onAction={multiplayer.sendAction} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} onRematch={multiplayer.isHost ? multiplayer.rematch : null} rematchNote="방장이 다시하기를 누르면 바로 새 판이 시작돼요" />}
+      {multiplayer.mode === "game" && multiplayer.game && <GameBoard game={multiplayer.game} me={multiplayer.me} roomCode={multiplayer.roomCode} onAction={multiplayer.sendAction} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} onRematch={multiplayer.isHost ? multiplayer.rematch : null} rematchNote="방장이 다시하기를 누르면 바로 새 판이 시작돼요" emote={multiplayer.emote} onEmote={multiplayer.sendEmote} />}
       {multiplayer.connectionState === "reconnecting" && multiplayer.mode !== "landing" && <ReconnectPill onRetry={multiplayer.retryNow} onLeave={multiplayer.leave} />}
       {multiplayer.error && <div className="global-error"><span>{multiplayer.error}</span><button onClick={() => multiplayer.setError("")} aria-label="오류 닫기"><X size={18} /></button></div>}
     </>

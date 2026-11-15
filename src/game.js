@@ -284,7 +284,8 @@ function currentPlayer(game, playerId) {
 
 function addLog(game, message, activity = {}) {
   game.log = [message, ...game.log].slice(0, 16);
-  game.activity = [{ ...activity, id: `activity-${Date.now()}-${game.log.length}`, text: message }, ...(game.activity || [])].slice(0, 16);
+  game.seq = (game.seq || 0) + 1; // 기록마다 고유한 순번을 붙여서 화면이 새 기록만 골라낼 수 있어요.
+  game.activity = [{ ...activity, id: `activity-${game.seq}`, seq: game.seq, text: message }, ...(game.activity || [])].slice(0, 16);
 }
 
 function describeColors(colors) {
@@ -451,6 +452,7 @@ export function viewFor(game, playerId) {
   return {
     ...game,
     decks: Object.fromEntries(Object.entries(game.decks).map(([tier, deck]) => [tier, deck.map(() => null)])),
+    activity: (game.activity || []).map((entry) => (entry.card?.secret && entry.playerId !== playerId ? { ...entry, card: undefined } : entry)),
     players: game.players.map((player) => (player.id === playerId ? player : {
       ...player,
       reserved: player.reserved.map((card) => (card.secret ? { id: card.id, tier: card.tier, secret: true } : card)),

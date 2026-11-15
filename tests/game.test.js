@@ -11,6 +11,7 @@ import {
   playerBonuses,
   tokenTotal,
 } from "../src/game.js";
+import { EMOTES, mascotLine, reactionFor } from "../src/mascots.js";
 import { BOT_LEVELS, chooseBotAction, legalBotActions, playTimedTurn } from "../src/bot.js";
 
 const players = (count) => Array.from({ length: count }, (_, index) => ({ id: `p${index}`, name: `친구${index + 1}`, avatar: "ruby" }));
@@ -146,4 +147,19 @@ test("다시하기는 같은 방 코드로도 카드를 새로 섞는다", () =>
   assert.equal(second.roomCode, "AGAIN");
   assert.notDeepEqual(first.board[1].map((card) => card.id), second.board[1].map((card) => card.id));
   assert.equal(second.players.every((player) => player.cards.length === 0 && tokenTotal(player) === 0), true);
+});
+
+test("마스코트마다 모든 감정표현과 반응 대사가 있고, 비공개 예약 카드는 기록으로도 새지 않는다", () => {
+  for (const avatar of ["chiikawa", "hachiware", "usagi", "kurimanju", "ode", "momonga"]) {
+    for (const key of [...EMOTES.map((item) => item.key), "buy", "points", "noble", "reserve", "discard", "win"]) assert.ok(mascotLine(avatar, key), `${avatar}/${key}`);
+  }
+  assert.equal(mascotLine("ruby", "hello"), mascotLine("chiikawa", "hello"));
+  let game = createGame(players(2), "TALK");
+  game = applyAction(game, "p0", { type: "reserve", source: "2" });
+  const entry = game.activity.find((item) => item.type === "reserve");
+  assert.equal(reactionFor(entry), "reserve");
+  assert.equal(reactionFor(game.activity[0]), null);
+  assert.equal(new Set(game.activity.map((item) => item.id)).size, game.activity.length);
+  assert.equal(viewFor(game, "p1").activity.find((item) => item.type === "reserve").card, undefined);
+  assert.ok(viewFor(game, "p0").activity.find((item) => item.type === "reserve").card);
 });
