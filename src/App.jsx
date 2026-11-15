@@ -41,6 +41,20 @@ const loadSession = () => {
   } catch { return null; }
 };
 const peerIdFor = (code) => `gemfriends-${code.toLowerCase()}`;
+// 서로 다른 와이파이/데이터망에서도 이어지도록 STUN 외에 공개 TURN 중계 서버를 함께 써요.
+// (무료 공용 중계라 속도는 느릴 수 있어요. 직접 연결이 되면 중계 없이 바로 연결돼요.)
+const PEER_OPTIONS = {
+  config: {
+    iceServers: [
+      { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+      { urls: ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443", "turn:openrelay.metered.ca:443?transport=tcp"], username: "openrelayproject", credential: "openrelayproject" },
+    ],
+  },
+};
+const MSG_SERVER = "연결 서버에 닿지 못했어요. 인터넷 연결을 확인하고 다시 시도해주세요.";
+const MSG_NOTFOUND = "방을 찾지 못했어요. 코드가 맞는지, 방장이 방 화면에 있는지 확인해주세요.";
+const MSG_TIMEOUT = "방장과 연결이 이어지지 않아요. 방장 화면이 켜져 있는지 확인하고 다시 시도해주세요.";
+const CONNECT_TIMEOUT_MS = 15000;
 
 function useMultiplayer() {
   const [mode, setMode] = useState("landing");
@@ -49,6 +63,8 @@ function useMultiplayer() {
   const [game, setGame] = useState(null);
   const [error, setError] = useState("");
   const [connectionState, setConnectionState] = useState("idle");
+  const [connectStatus, setConnectStatus] = useState("");
+  const serverTimerRef = useRef(null);
   const peerRef = useRef(null);
   const hostConnectionRef = useRef(null);
   const guestConnectionsRef = useRef(new Map());
@@ -145,6 +161,7 @@ function useMultiplayer() {
 
   const cleanup = useCallback(() => {
     clearTimeout(retryRef.current);
+    clearTimeout(serverTimerRef.current);
     peerRef.current?.destroy();
     peerRef.current = null;
     hostConnectionRef.current = null;
@@ -192,11 +209,19 @@ function useMultiplayer() {
       setMode(resume.game ? "game" : "lobby");
     }
     setConnectionState(resume ? "reconnecting" : "connecting");
+    setConnectStatus("방을 만드는 중…");
     let attempts = 0;
     const open = () => {
-      const peer = new Peer(peerIdFor(code));
+      const peer = new Peer(peerIdFor(code), PEER_OPTIONS);
       peerRef.current = peer;
+      clearTimeout(serverTimerRef.current);
+      serverTimerRef.current = setTimeout(() => {
+        if (peerRef.current !== peer || peer.open || lobbyRef.current) return;
+        cleanup(); setError("방을 열지 못했어요. 인터넷 연결을 확인하고 다시 시도해주세요."); setConnectionState("error"); setConnectStatus("");
+      }, 12000);
       peer.on("open", () => {
+        clearTimeout(serverTimerRef.current);
+        setConnectStatus("");
         if (!lobbyRef.current) {
           setRoomCode(code);
           setLobbyState({ roomCode: code, status: "waiting", hostId: profile.id, players: [{ ...profile, connected: true }] });
@@ -216,8 +241,10 @@ function useMultiplayer() {
           if (peer.destroyed) retryRef.current = setTimeout(open, 2000);
           return;
         }
+        clearTimeout(serverTimerRef.current);
         setError(peerError.type === "unavailable-id" && !lobbyRef.current ? "방 코드가 겹쳤어요. 다시 만들어주세요." : "방을 열지 못했어요. 잠시 후 다시 시도해주세요.");
         setConnectionState("error");
+        setConnectStatus("");
       });
     };
     open();
@@ -227,12 +254,13 @@ function useMultiplayer() {
     cleanup();
     const code = rawCode.trim().toUpperCase();
     if (code.length !== 5) { setError("5자리 방 코드를 확인해주세요."); return; }
-    const peer = new Peer();
+    const peer = new Peer(PEER_OPTIONS);
     peerRef.current = peer;
     profileRef.current = profile;
     isHostRef.current = false;
     let joined = Boolean(resume);
     let attempts = 0;
+    let failCurrent = null;
     if (resume) {
       setRoomCode(code);
       setLobbyState(resume.lobby);
@@ -240,26 +268,39 @@ function useMultiplayer() {
       setMode(resume.game ? "game" : "lobby");
     }
     setConnectionState(resume ? "reconnecting" : "connecting");
-    const retry = () => {
+    setConnectStatus("연결 서버에 접속하는 중…");
+
+    const giveUp = (message) => {
+      if (peerRef.current !== peer) return;
+      cleanup();
+      setError(message);
+      setConnectionState("error");
+      setConnectStatus("");
+    };
+    // 처음 입장은 3번까지 시도하고, 한 번 들어온 방은 방장이 돌아올 때까지 2분쯤 기다려요.
+    const retry = (reason) => {
       if (peerRef.current !== peer) return;
       attempts += 1;
-      // 처음 입장은 금방 포기하고, 한 번 들어온 방은 방장이 돌아올 때까지 2분쯤 기다려요.
-      if (peer.destroyed || attempts > (joined ? 60 : 2)) {
-        setError(joined ? "방장과 연결이 끊겼어요." : "방을 찾지 못했어요. 코드와 방장 접속 상태를 확인해주세요.");
-        setConnectionState("error");
-        return;
-      }
+      if (peer.destroyed || attempts >= (joined ? 60 : 3)) { giveUp(joined ? "방장과 연결이 끊겼어요." : reason); return; }
       if (joined) setConnectionState("reconnecting");
-      retryRef.current = setTimeout(connect, 2000);
+      else setConnectStatus(`다시 시도하는 중… (${attempts + 1}/3)`);
+      retryRef.current = setTimeout(connect, 1500);
     };
-    const connect = () => {
+    function connect() {
       if (peerRef.current !== peer || peer.destroyed) return;
-      if (peer.disconnected) { peer.reconnect(); retry(); return; }
+      if (peer.disconnected) { peer.reconnect(); retry(MSG_SERVER); return; }
+      if (!joined) setConnectStatus(attempts ? `방장을 찾는 중… (${attempts + 1}/3)` : "방장을 찾는 중…");
       const connection = peer.connect(peerIdFor(code), { reliable: true });
       hostConnectionRef.current = connection;
       let failed = false;
-      const fail = () => { if (failed || hostConnectionRef.current !== connection) return; failed = true; clearTimeout(timeout); connection.close(); retry(); };
-      const timeout = setTimeout(() => { if (!connection.open) fail(); }, 6000);
+      const fail = (reason) => {
+        if (failed || hostConnectionRef.current !== connection) return;
+        failed = true; clearTimeout(timeout); failCurrent = null;
+        connection.close();
+        retry(reason);
+      };
+      failCurrent = fail;
+      const timeout = setTimeout(() => { if (!connection.open) fail(MSG_TIMEOUT); }, CONNECT_TIMEOUT_MS);
       connection.on("open", () => {
         clearTimeout(timeout);
         attempts = 0;
@@ -268,20 +309,27 @@ function useMultiplayer() {
         setRoomCode(code);
         if (!gameRef.current) setMode("lobby");
         setConnectionState("connected");
+        setConnectStatus("");
         history.replaceState(null, "", `?room=${code}`);
       });
       connection.on("data", (message) => {
         if (message.type === "lobby") setLobbyState(message.lobby);
         if (message.type === "game") { setGameState(message.game); setMode("game"); }
-        if (message.type === "error") setError(message.message);
+        if (message.type === "error") {
+          setError(message.message);
+          // 가득 찼거나 이미 시작된 방은 다시 시도해도 소용없어요.
+          if (!joined || !gameRef.current) { cleanup(); setConnectionState("error"); setConnectStatus(""); if (!gameRef.current) setMode("landing"); }
+        }
       });
-      connection.on("close", fail);
-    };
-    peer.on("open", connect);
+      connection.on("close", () => fail(MSG_TIMEOUT));
+    }
+    serverTimerRef.current = setTimeout(() => { if (!peer.open) giveUp(MSG_SERVER); }, 12000);
+    peer.on("open", () => { clearTimeout(serverTimerRef.current); connect(); });
     peer.on("disconnected", () => reconnectSoon(peer));
     peer.on("error", (peerError) => {
-      if (peerRef.current !== peer || peerError.type === "peer-unavailable") return; // 방장 부재는 연결 타임아웃이 재시도해요.
-      if (!joined || peer.destroyed) { setError("친구 방에 연결하지 못했어요."); setConnectionState("error"); }
+      if (peerRef.current !== peer) return;
+      if (peerError.type === "peer-unavailable") { failCurrent?.(MSG_NOTFOUND); return; }
+      if (!joined) giveUp(MSG_SERVER);
     });
   }, [cleanup, reconnectSoon, setGameState, setLobbyState]);
 
@@ -325,7 +373,7 @@ function useMultiplayer() {
   }, [cleanup, setGameState, setLobbyState]);
 
   return {
-    mode, roomCode, lobby, game, error, setError, connectionState,
+    mode, roomCode, lobby, game, error, setError, connectionState, connectStatus,
     me: profileRef.current, isHost: isHostRef.current,
     hostRoom, joinRoom, startGame, sendAction, leave,
   };
@@ -336,7 +384,7 @@ function Avatar({ avatar, size = "md" }) {
   return <span className={`avatar avatar-${size}`} style={{ "--avatar-bg": item.color }} aria-label={item.label}><img src={item.image} alt="" /></span>;
 }
 
-function Landing({ onHost, onJoin, onSolo, onTutorial, connecting }) {
+function Landing({ onHost, onJoin, onSolo, onTutorial, onCancel, connecting, status }) {
   const initialRoom = new URLSearchParams(location.search).get("room")?.toUpperCase() || "";
   const [name, setName] = useState(localStorage.getItem("gemfriends-name") || "");
   const savedAvatar = localStorage.getItem("gemfriends-avatar");
@@ -344,9 +392,14 @@ function Landing({ onHost, onJoin, onSolo, onTutorial, connecting }) {
   const [room, setRoom] = useState(initialRoom);
   const [difficulty, setDifficulty] = useState(localStorage.getItem("gemfriends-bot-level") || "intermediate");
 
+  const [formMessage, setFormMessage] = useState("");
+  const busy = connecting === "connecting";
+
   const profile = () => {
     const cleanName = name.trim().slice(0, 10);
-    if (!cleanName) return null;
+    // 이름이 비어 있으면 아무 반응이 없는 것처럼 보이지 않도록 바로 알려줘요.
+    if (!cleanName) { setFormMessage("이름을 먼저 적어주세요."); document.getElementById("player-name")?.focus(); return null; }
+    setFormMessage("");
     localStorage.setItem("gemfriends-name", cleanName);
     localStorage.setItem("gemfriends-avatar", avatar);
     const savedId = localStorage.getItem("gemfriends-id") || makeId();
@@ -370,7 +423,7 @@ function Landing({ onHost, onJoin, onSolo, onTutorial, connecting }) {
             <span><b>스플렌더가 처음인가요?</b><small>2·3·4인 규칙을 8단계로 연습해요</small></span><ChevronRight />
           </button>
           <div className="profile-card glass-card">
-            <label>플레이어 이름<input value={name} onChange={(event) => setName(event.target.value)} placeholder="이름을 적어주세요" maxLength={10} /></label>
+            <label>플레이어 이름<input id="player-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="이름을 적어주세요" maxLength={10} /></label>
             <fieldset>
             <legend>내 보석 마스코트 고르기</legend>
               <div className="avatar-options">
@@ -394,11 +447,17 @@ function Landing({ onHost, onJoin, onSolo, onTutorial, connecting }) {
             </fieldset>
             <div className="mode-divider"><span>친구와 플레이</span></div>
             <div className="room-actions">
-              <button className="primary-button" disabled={connecting === "connecting"} onClick={() => { const p = profile(); if (p) onHost(p); }}><Play size={19} fill="currentColor" /> 새 방 만들기</button>
-              <div className="join-row">
-                <input aria-label="방 코드" value={room} onChange={(event) => setRoom(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5))} placeholder="방 코드 5자리" />
-                <button disabled={connecting === "connecting"} onClick={() => { const p = profile(); if (p) onJoin(p, room); }}>입장 <ChevronRight size={18} /></button>
-              </div>
+              <button className="primary-button" disabled={busy} onClick={() => { const p = profile(); if (p) onHost(p); }}><Play size={19} fill="currentColor" /> 새 방 만들기</button>
+              <form className="join-row" onSubmit={(event) => {
+                event.preventDefault();
+                if (room.length !== 5) { setFormMessage("방 코드 5자리를 입력해주세요."); return; }
+                const p = profile(); if (p) onJoin(p, room);
+              }}>
+                <input aria-label="방 코드" value={room} autoCapitalize="characters" autoComplete="off" autoCorrect="off" spellCheck={false} onChange={(event) => { setFormMessage(""); setRoom(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5)); }} placeholder="방 코드 5자리" />
+                <button type="submit" disabled={busy}>입장 <ChevronRight size={18} /></button>
+              </form>
+              {formMessage && <p className="form-message" role="alert">{formMessage}</p>}
+              {busy && <div className="connect-status" role="status"><span className="spinner" /><b>{status || "연결하는 중…"}</b><button type="button" onClick={onCancel}>취소</button></div>}
             </div>
           </div>
           <p className="fan-note">비상업 팬메이드 게임 · 친구끼리 가볍게 즐겨요</p>
@@ -703,7 +762,7 @@ export default function App() {
   else if (soloConfig) content = <SoloGame profile={soloConfig.profile} difficulty={soloConfig.difficulty} onLeave={() => setSoloConfig(null)} onTutorial={() => setTutorialOpen(true)} />;
   else content = (
     <>
-      {multiplayer.mode === "landing" && <Landing onHost={multiplayer.hostRoom} onJoin={multiplayer.joinRoom} onSolo={(profile, difficulty) => setSoloConfig({ profile, difficulty })} onTutorial={() => setTutorialOpen(true)} connecting={multiplayer.connectionState} />}
+      {multiplayer.mode === "landing" && <Landing onHost={multiplayer.hostRoom} onJoin={multiplayer.joinRoom} onSolo={(profile, difficulty) => setSoloConfig({ profile, difficulty })} onTutorial={() => setTutorialOpen(true)} onCancel={multiplayer.leave} connecting={multiplayer.connectionState} status={multiplayer.connectStatus} />}
       {multiplayer.mode === "lobby" && <Lobby lobby={multiplayer.lobby} me={multiplayer.me} isHost={multiplayer.isHost} onStart={multiplayer.startGame} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} />}
       {multiplayer.mode === "game" && multiplayer.game && <GameBoard game={multiplayer.game} me={multiplayer.me} roomCode={multiplayer.roomCode} onAction={multiplayer.sendAction} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} />}
       {multiplayer.connectionState === "reconnecting" && multiplayer.mode !== "landing" && <div className="reconnect-pill" role="status"><span /> 다시 연결하는 중…</div>}

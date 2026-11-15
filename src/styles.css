@@ -64,6 +64,11 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .join-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
 .join-row input { min-width: 0; border: 1px solid #e7dad1; border-radius: 13px; background: white; text-transform: uppercase; letter-spacing: .12em; font-weight: 800; padding: 0 14px; }
 .join-row button { border: 1px solid #e7dad1; border-radius: 13px; background: white; padding: 0 17px; font-weight: 800; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.form-message { margin: 0; color: #c23a58; font-size: 12px; font-weight: 800; }
+.connect-status { display: flex; align-items: center; gap: 10px; background: #fff7e6; border: 1px solid #f1d9a3; border-radius: 13px; padding: 9px 12px; font-size: 12px; color: #7a5a1c; }
+.connect-status b { flex: 1; }.connect-status button { border: 0; background: #fff; border-radius: 9px; padding: 6px 11px; font-weight: 800; cursor: pointer; }
+.spinner { width: 16px; height: 16px; border-radius: 50%; border: 3px solid #f1d9a3; border-top-color: #e8a317; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .fan-note { font-size: 11px !important; color: #9b8d93 !important; margin: 12px 4px !important; }
 .feature-strip { display: grid; grid-template-columns: repeat(4, 1fr); max-width: 1180px; margin: -10px auto 70px; padding: 0 5vw; position: relative; z-index: 2; }
 .feature-strip > div,.feature-strip > button { min-width:0;padding:20px 22px;border:0;border-right:1px solid #e8ddd5;background:transparent;display:grid;grid-template-columns:auto 1fr;column-gap:12px;align-items:center;text-align:left; }
@@ -164,8 +169,10 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .card-bonus { width: 26px; height: 26px; background-color: var(--bonus-color); background-image: radial-gradient(circle at 30% 25%,rgba(255,255,255,.85) 0 9%,transparent 10%),linear-gradient(135deg,rgba(255,255,255,.28),transparent 55%,rgba(0,0,0,.2)); }
 .bonus-white .card-bonus { background-color: #fff; background-image: linear-gradient(135deg,#fff 30%,#b9ad9c); }
 .card-top { filter: drop-shadow(0 1px 1px rgba(60,48,55,.35)); }
-.cost-list { position: absolute; left: 5px; bottom: 5px; display: flex; flex-direction: column-reverse; flex-wrap: wrap-reverse; align-content: flex-start; gap: 3px; max-height: calc(100% - 44px); }
-.is-actionable .cost-list { bottom: 34px; max-height: calc(100% - 73px); }
+/* 비용은 카드 아래 띠에 가로로 깔아서, 색이 많거나 개수가 커도 잘리거나 위로 밀리지 않아요. */
+.cost-list { position: absolute; left: 0; right: 0; bottom: 0; display: flex; flex-wrap: wrap; align-content: flex-end; gap: 3px; padding: 14px 5px 5px; background: linear-gradient(180deg,transparent,rgba(40,30,38,.55) 42%); }
+.is-actionable .cost-list { bottom: 33px; padding-bottom: 3px; }
+.dev-card .cost-list .mini-gem { min-width: 25px; height: 23px; font-size: 13px; padding: 0 3px; }.dev-card .cost-list .mini-gem b { font-size: 13px; }
 .mini-gem { min-width: 26px; height: 22px; border:2px solid rgba(255,255,255,.88); display: inline-flex; align-items: center; justify-content: center; gap: 2px; color: white; font-size: 11px; text-shadow: 0 1px 1px rgba(0,0,0,.25); box-shadow:0 1px 3px rgba(49,38,45,.35); }
 .asset-card { width: 100%; max-width: 34px; height: 25px; border-radius: 5px; border: 2px solid rgba(255,255,255,.88); display: grid; place-items: center; color: white; font-size: 13px; font-weight: 900; box-shadow: 0 1px 3px rgba(49,38,45,.3); }
 .asset-token { width: 24px; height: 24px; border-radius: 50%; border: 2px solid rgba(255,255,255,.88); display: grid; place-items: center; color: white; font-size: 12px; font-weight: 800; box-shadow: 0 1px 3px rgba(49,38,45,.3); }
@@ -283,7 +290,7 @@ button.reserved-chip:disabled { opacity: 1; cursor: default; }
   .lobby-card { padding:34px 18px; }.lobby-card h1{font-size:39px}.players-grid{grid-template-columns:1fr 1fr}.room-code span{font-size:24px}.start-button{width:100%}
   .game-header .brand > span:last-of-type,.room-chip { display:none; }.game-header{padding:0 7px;gap:5px}.turn-banner{font-size:11px;padding-right:8px;gap:5px}.turn-banner small{display:none}.turn-banner>b{min-width:38px;padding-left:6px}.header-actions{gap:4px}.header-actions button{width:34px;height:34px}
   .game-layout { padding:7px }.panel-card{padding:8px}.board-top-row{grid-template-columns:minmax(0,1fr);gap:8px}.token-row{gap:4px;justify-content:space-between}.token{width:50px;height:50px}
-  .market{padding:7px;grid-template-rows:none}.market-row{grid-template-columns:46px minmax(0,1fr);gap:5px}.deck{position:sticky;left:0;z-index:3}.cards-row{gap:6px;overflow-x:auto;scroll-snap-type:x proximity;grid-template-columns:repeat(4,128px);padding:2px 3px 6px;-webkit-overflow-scrolling:touch}.dev-card{scroll-snap-align:start}.card-actions button{height:32px}.is-actionable .cost-list{bottom:39px;max-height:calc(100% - 78px)}
+  .market{padding:7px;grid-template-rows:none}.market-row{grid-template-columns:46px minmax(0,1fr);gap:5px}.deck{position:sticky;left:0;z-index:3}.cards-row{gap:6px;overflow-x:auto;scroll-snap-type:x proximity;grid-template-columns:repeat(4,128px);padding:2px 3px 6px;-webkit-overflow-scrolling:touch}.dev-card{scroll-snap-align:start}.card-actions button{height:32px}.is-actionable .cost-list{bottom:38px}
   .choice-modal,.winner-modal{padding:25px 16px}.winner-modal h1{font-size:38px}.scoreboard>div{grid-template-columns:18px 40px 1fr auto}.scoreboard small{display:none}
   .tutorial-backdrop{padding:0}.tutorial-dialog{width:100%;height:100%;max-height:none;border:0;border-radius:0}.tutorial-header{min-height:68px;padding:8px 12px;border-radius:0}.tutorial-guide img{width:46px;height:46px}.tutorial-guide b{font-size:20px}.tutorial-guide small{font-size:8px}.tutorial-toolbar{padding:9px 12px 0;grid-template-columns:1fr;gap:8px}.player-count-picker{justify-self:center}.tutorial-content{min-height:0;padding:16px 14px 12px;gap:14px}.tutorial-copy h2{font-size:31px;margin:10px 0}.tutorial-copy>p{font-size:12px;line-height:1.65}.tutorial-copy ul{margin-top:12px;gap:5px}.tutorial-copy li{font-size:10px}.tutorial-visual{min-height:260px;padding:16px}.tutorial-goal{width:205px;height:205px}.tutorial-goal>strong{font-size:76px}.tutorial-board-map .map-market{min-height:105px}.tutorial-footer{position:sticky;bottom:0;background:#fffdf8;min-height:64px;padding:9px 10px;grid-template-columns:92px 1fr 112px}.tutorial-footer>button{font-size:10px;min-height:42px}.tutorial-dots{gap:4px}.tutorial-dots button{width:7px;height:7px}.tutorial-dots button[aria-current="step"]{width:18px}.tutorial-next.finish{font-size:9px}.tutorial-turn-order img{width:52px;height:52px}
 }
