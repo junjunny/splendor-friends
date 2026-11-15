@@ -1,2 +1,29 @@
-# splendor-friends
-Chiikawa fan-made Splendor-style board game with solo bots and online multiplayer.
+# 보석친구 · 스플렌더 팬게임
+
+먼작귀 카드 일러스트와 귀여운 보석 토큰으로 즐기는 비상업 팬메이드 스플렌더 스타일 보드게임입니다.
+
+## 포함 기능
+
+- 2–4인 PeerJS 온라인 멀티플레이
+- 1인 플레이: 초급·중급·고급·레전더리 봇
+- 공식 스플렌더 카드 구성과 인원별 토큰·귀족 세팅
+- 30초 턴 제한 및 시간 초과 자동 진행
+- 모바일 카드 가로 스크롤과 플레이어 패널
+
+## 실행
+
+```bash
+npm install
+npm run dev
+```
+
+테스트와 프로덕션 빌드는 다음 명령으로 확인할 수 있습니다.
+
+```bash
+npm test
+npm run build
+```
+
+실제 배포: [splendor-friends.vercel.app](https://splendor-friends.vercel.app)
+
+> 본 프로젝트는 비상업 팬메이드 프로젝트입니다. 카드 일러스트는 먼작귀 팬아트 자산을 사용합니다.
