@@ -42,6 +42,7 @@ test("카드 단계별 일러스트 방향과 카드별 변형 키가 유지된�
   assert.ok(decks.slice(1).flat().every((card) => card.artType === "character"));
   const allCards = decks.flat();
   assert.equal(new Set(allCards.map((card) => card.artVariant)).size, allCards.length);
+  assert.equal(new Set(allCards.map((card) => card.art)).size, allCards.length);
 });
 
 test("서로 다른 보석 3개를 가져오면 공급처와 플레이어 수량이 갱신된다", () => {
