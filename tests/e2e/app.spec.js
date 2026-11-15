@@ -35,6 +35,33 @@ test("튜토리얼이 2·3·4인 준비와 8단계를 정확히 안내한다", a
   await expect(dialog).toContainText("30초 안에 행동 하나");
 });
 
+test("튜토리얼의 설명·그림·버튼이 겹치지 않고 항상 화면 안에 있으며 연습이 동작한다", async ({ page }) => {
+  await page.getByRole("button", { name: /튜토리얼/ }).first().click();
+  const dialog = page.getByRole("dialog");
+  for (let index = 1; index <= 8; index += 1) {
+    await dialog.getByRole("button", { name: new RegExp(`^${index}단계`) }).click();
+    const layout = await page.evaluate(() => {
+      const rect = (selector) => document.querySelector(selector).getBoundingClientRect();
+      const copy = rect(".tut-copy"); const visual = rect(".tut-visual"); const footer = rect(".tut-footer"); const next = rect(".tut-next");
+      const stacked = visual.top >= copy.bottom - 1 || visual.left >= copy.right - 1 || copy.left >= visual.right - 1;
+      return { stacked, footerInside: footer.bottom <= innerHeight + 1 && footer.top >= 0, nextInside: next.right <= innerWidth + 1 && next.left >= 0 };
+    });
+    expect(layout.stacked, `${index}단계에서 설명과 그림이 겹치면 안 됩니다.`).toBeTruthy();
+    expect(layout.footerInside && layout.nextInside, `${index}단계에서 이전/다음 버튼이 화면 안에 있어야 합니다.`).toBeTruthy();
+  }
+  // 보석 연습: 서로 다른 3개를 누르면 완료 메시지가 나와요
+  await dialog.getByRole("button", { name: /^4단계/ }).click();
+  for (const name of ["다이아몬드 보석", "사파이어 보석", "에메랄드 보석"]) await dialog.getByRole("button", { name }).click();
+  await expect(dialog).toContainText("서로 다른 보석 3개를 가져갔어요");
+  // 귀족 연습: 카드를 4장씩 사면 귀족이 찾아와요
+  await dialog.getByRole("button", { name: /^7단계/ }).click();
+  for (let count = 0; count < 4; count += 1) {
+    await dialog.getByRole("button", { name: "파랑 카드 사기" }).click();
+    await dialog.getByRole("button", { name: "초록 카드 사기" }).click();
+  }
+  await expect(dialog).toContainText("귀족님이 찾아왔어요");
+});
+
 test("튜토리얼과 랜딩이 현재 화면 폭을 넘지 않는다", async ({ page }) => {
   const noOverflow = async () => expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBeTruthy();
   await noOverflow();
@@ -94,5 +121,11 @@ test("90장 카드 파일이 브라우저에서도 전부 로드된다", async (
 
 test("핵심 화면에 심각한 접근성 위반이 없다", async ({ page }) => {
   const results = await new AxeBuilder({ page }).disableRules(["color-contrast"]).analyze();
+  expect(results.violations).toEqual([]);
+});
+
+test("튜토리얼 창에도 심각한 접근성 위반이 없다", async ({ page }) => {
+  await page.getByRole("button", { name: /튜토리얼/ }).first().click();
+  const results = await new AxeBuilder({ page }).include(".tut-dialog").disableRules(["color-contrast"]).analyze();
   expect(results.violations).toEqual([]);
 });
