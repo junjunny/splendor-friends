@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import {
   COLORS,
   applyAction,
@@ -43,6 +44,8 @@ test("카드 단계별 일러스트 방향과 카드별 변형 키가 유지된�
   const allCards = decks.flat();
   assert.equal(new Set(allCards.map((card) => card.artVariant)).size, allCards.length);
   assert.equal(new Set(allCards.map((card) => card.art)).size, allCards.length);
+  assert.ok(allCards.every((card) => card.art.endsWith(".jpg")));
+  assert.ok(allCards.every((card) => existsSync(new URL(`../public/assets/cards/${card.art}`, import.meta.url))));
 });
 
 test("서로 다른 보석 3개를 가져오면 공급처와 플레이어 수량이 갱신된다", () => {

@@ -171,7 +171,7 @@ export function createDeck(tier, seed = "gem-friends") {
         points,
         // 모든 카드가 서로 다른 파일을 가리키도록 고유 SVG 아트 키를 부여해요.
         // SVG 안에서 먼작귀 원화와 배경을 카드별로 다른 크롭/장식으로 합성합니다.
-        art: `generated/card-${String(index).padStart(3, "0")}.svg`,
+        art: `generated/card-${String(index).padStart(3, "0")}.jpg`,
         artVariant: index,
         artType: useBackground ? "background" : "character",
         cost: Object.fromEntries(COLORS.map((color, colorIndex) => [color, costs[colorIndex]])),
@@ -199,7 +199,7 @@ function makePlayer(player) {
   return {
     id: player.id,
     name: player.name,
-    avatar: player.avatar || "ruby",
+    avatar: player.avatar || "chiikawa",
     isBot: Boolean(player.isBot),
     difficulty: player.difficulty || null,
     connected: true,

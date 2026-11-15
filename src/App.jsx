@@ -16,11 +16,14 @@ import {
 import { BOT_LEVELS, chooseBotAction, playTimedTurn } from "./bot.js";
 
 const AVATARS = {
-  ruby: { label: "루비콩", emoji: "♦", color: "#ffd0d9" },
-  sapphire: { label: "사파콩", emoji: "♦", color: "#cceaff" },
-  emerald: { label: "에메콩", emoji: "♦", color: "#cdeedc" },
-  diamond: { label: "다이아콩", emoji: "◇", color: "#f3ecff" },
+  chiikawa: { label: "치이카와", image: "/assets/cards/chiikawa.png", color: "#ffe2e9" },
+  hachiware: { label: "하치와레", image: "/assets/cards/hachiware.png", color: "#d9efff" },
+  usagi: { label: "우사기", image: "/assets/cards/usagi.png", color: "#fff0b8" },
+  kurimanju: { label: "쿠리만쥬", image: "/assets/cards/kurimanju.png", color: "#f1ddc8" },
+  ode: { label: "오데", image: "/assets/cards/ode.png", color: "#dcebd8" },
+  momonga: { label: "모몽가", image: "/assets/cards/momonga.png", color: "#eee2ff" },
 };
+const LEGACY_AVATARS = { ruby: "chiikawa", sapphire: "hachiware", emerald: "usagi", diamond: "momonga" };
 
 const makeId = () => crypto.randomUUID();
 const makeRoomCode = () => {
@@ -228,14 +231,15 @@ function useMultiplayer() {
 }
 
 function Avatar({ avatar, size = "md" }) {
-  const item = AVATARS[avatar] || AVATARS.chiikawa;
-  return <span className={`avatar avatar-${size}`} style={{ "--avatar-bg": item.color }} aria-label={item.label}>{item.emoji}</span>;
+  const item = AVATARS[LEGACY_AVATARS[avatar] || avatar] || AVATARS.chiikawa;
+  return <span className={`avatar avatar-${size}`} style={{ "--avatar-bg": item.color }} aria-label={item.label}><img src={item.image} alt="" /></span>;
 }
 
 function Landing({ onHost, onJoin, onSolo, connecting }) {
   const initialRoom = new URLSearchParams(location.search).get("room")?.toUpperCase() || "";
   const [name, setName] = useState(localStorage.getItem("gemfriends-name") || "");
-  const [avatar, setAvatar] = useState(localStorage.getItem("gemfriends-avatar") || "ruby");
+  const savedAvatar = localStorage.getItem("gemfriends-avatar");
+  const [avatar, setAvatar] = useState(AVATARS[savedAvatar] ? savedAvatar : (LEGACY_AVATARS[savedAvatar] || "chiikawa"));
   const [room, setRoom] = useState(initialRoom);
   const [difficulty, setDifficulty] = useState(localStorage.getItem("gemfriends-bot-level") || "intermediate");
 
@@ -267,7 +271,7 @@ function Landing({ onHost, onJoin, onSolo, connecting }) {
               <div className="avatar-options">
                 {Object.entries(AVATARS).map(([key, item]) => (
                   <button key={key} type="button" className={avatar === key ? "selected" : ""} onClick={() => setAvatar(key)} aria-label={item.label} style={{ "--avatar-bg": item.color }}>
-                    <span>{item.emoji}</span>{avatar === key && <Check size={14} />}
+                    <span><img src={item.image} alt="" /></span>{avatar === key && <Check size={14} />}
                   </button>
                 ))}
               </div>
@@ -382,7 +386,7 @@ function DevelopmentCard({ card, canAct, onBuy, onReserve, source }) {
   return (
     <article className={`dev-card bonus-${card.bonus}`} style={{ "--bonus-color": COLOR_META[card.bonus].hex }}>
       <div className="card-top"><strong>{card.points || ""}</strong><span className={`card-bonus mini-shape-${COLOR_META[card.bonus].shape}`} title={`${COLOR_META[card.bonus].label} 영구 할인`}>{COLOR_META[card.bonus].short}</span></div>
-      <div className={`card-art card-art-${card.artType} card-art-v-${artVariant}`} style={artStyle}><img src={`/assets/cards/${card.art}`} alt="먼작귀 팬아트 카드" loading="lazy" /><i>LEVEL {card.tier} · #{(card.artVariant ?? 0) + 1}</i></div>
+      <div className={`card-art card-art-${card.artType} card-art-v-${artVariant}`} style={artStyle}><img src={`/assets/cards/${card.art}`} alt="먼작귀 팬아트 카드" loading="lazy" /></div>
       <div className="cost-list">
         {COLORS.filter((color) => card.cost[color] > 0).map((color) => <MiniGem key={color} color={color} count={card.cost[color]} />)}
       </div>
@@ -397,40 +401,6 @@ function DevelopmentCard({ card, canAct, onBuy, onReserve, source }) {
 function NobleCard({ noble, selectable, onClick }) {
   return (
     <button className={`noble-card ${selectable ? "selectable" : ""}`} onClick={onClick} disabled={!selectable}><Crown size={21} /><strong>3</strong><div>{Object.entries(noble.cost).map(([color, count]) => <MiniGem key={color} color={color} count={count} />)}</div></button>
-  );
-}
-
-function ActivityCardThumb({ card }) {
-  if (!card) return null;
-  return <div className="activity-card-thumb"><img src={`/assets/cards/${card.art}`} alt="행동 카드" /><span>{card.points || 0}</span></div>;
-}
-
-function ActivityEvent({ event, me, players = [] }) {
-  const current = event || {};
-  const mine = current.playerId === me?.id;
-  const actor = players.find((player) => player.id === current.playerId);
-  const colors = current.colors || [];
-  const groupedColors = [...new Set(colors)].map((color) => ({ color, count: colors.filter((item) => item === color).length }));
-  const playerLabel = `${current.playerName || "플레이어"}${mine ? " · 나" : ""}`;
-  let actionLabel = "게임 소식";
-  if (current.type === "take") actionLabel = "보석 가져감";
-  if (current.type === "discard") actionLabel = "보석 반납";
-  if (current.type === "buy") actionLabel = "개발 카드 구매";
-  if (current.type === "reserve") actionLabel = "카드 예약";
-  if (current.type === "noble") actionLabel = "귀족 방문";
-  if (current.type === "turn") actionLabel = "차례 시작";
-  return (
-    <div className={`activity-event ${mine ? "mine" : ""}`}>
-      <Avatar avatar={actor?.avatar || (mine ? "ruby" : "sapphire")} size="sm" />
-      <div className="activity-copy"><strong>{playerLabel}</strong><span>{actionLabel}</span></div>
-      <div className="activity-visual">
-        {(current.type === "take" || current.type === "discard") && groupedColors.map(({ color, count }) => <MiniGem key={color} color={color} count={count} />)}
-        {(current.type === "buy" || current.type === "reserve") && <ActivityCardThumb card={current.card} />}
-        {current.type === "reserve" && current.receivedGold && <MiniGem color="gold" count={1} />}
-        {current.type === "noble" && <span className="activity-noble">♛</span>}
-        {(current.type === "turn" || current.type === "info" || !current.type) && <span className="activity-dot">•</span>}
-      </div>
-    </div>
   );
 }
 
@@ -460,7 +430,6 @@ function GameBoard({ game, me, roomCode, onAction, onLeave }) {
   const [mobilePanel, setMobilePanel] = useState(false);
   const [timeLeft, setTimeLeft] = useState(() => Math.max(0, Math.ceil((game.turnDeadline - Date.now()) / 1000)));
   const player = game.players.find((item) => item.id === me?.id);
-  const activities = game.activity || game.log.map((text) => ({ type: "info", text }));
   const isMyTurn = game.status === "playing" && game.players[game.turn]?.id === me?.id;
   const canMainAction = isMyTurn && !game.pending;
 
@@ -506,10 +475,9 @@ function GameBoard({ game, me, roomCode, onAction, onLeave }) {
             <section className="nobles-section panel-card"><div className="section-title"><div><span>귀족 광장</span><small>조건을 채우면 3점</small></div></div><div className="nobles-row">{game.nobles.map((noble) => <NobleCard key={noble.id} noble={noble} />)}</div></section>
           </div>
 
-          <section className="activity-feed panel-card">
-            <div className="section-title"><div><span>실시간 플레이</span><small>상대의 점수와 최근 행동</small></div><b className="activity-live">LIVE</b></div>
+          <section className="player-overview panel-card">
+            <div className="section-title"><div><span>플레이어 현황</span><small>점수·카드·예약·보유 보석</small></div></div>
             <div className="score-strip">{game.players.map((item) => <span key={item.id} className={item.id === me?.id ? "is-me" : ""}><Avatar avatar={item.avatar} size="sm" /><div className="score-player"><b>{item.name}</b><small>카드 {item.cards.length}장 · 예약 {item.reserved.length}</small></div><strong>{playerScore(item)}점</strong><div className="score-assets">{ALL_TOKENS.filter((color) => item.tokens[color] > 0).map((color) => <MiniGem key={color} color={color} count={item.tokens[color]} />)}</div></span>)}</div>
-            <div className="activity-list">{activities.slice(0, 5).map((item, index) => <ActivityEvent key={`${item.id || item.text}-${index}`} event={item} me={me} players={game.players} />)}</div>
           </section>
 
           <section className="market panel-card">
@@ -524,7 +492,6 @@ function GameBoard({ game, me, roomCode, onAction, onLeave }) {
           <button className="mobile-panel-toggle" onClick={() => setMobilePanel((value) => !value)}><Users size={18} /> 플레이어 {mobilePanel ? <X /> : <ChevronRight />}</button>
           <div className="room-mini"><span>ROOM</span><b>{roomCode}</b></div>
           <div className="players-stack">{game.players.map((item, index) => <PlayerPanel key={item.id} player={item} active={index === game.turn && game.status !== "finished"} me={item.id === me?.id} canAct={canMainAction} onBuyReserved={(card) => buy(card, "reserved")} />)}</div>
-          <div className="game-log"><strong>행동 기록</strong>{activities.slice(0, 6).map((item, index) => <ActivityEvent key={`${item.id || item.text}-${index}`} event={item} me={me} players={game.players} />)}</div>
         </aside>
       </div>
       {notice && <div className="toast">{notice}</div>}
@@ -555,8 +522,8 @@ function WinnerModal({ game, me, onLeave }) {
 
 function DemoGame() {
   const demoPlayers = useMemo(() => [
-    { id: "demo-me", name: "준희", avatar: "ruby" },
-    { id: "demo-friend", name: "보석친구", avatar: "sapphire" },
+    { id: "demo-me", name: "준희", avatar: "chiikawa" },
+    { id: "demo-friend", name: "보석친구", avatar: "hachiware" },
   ], []);
   const [demoGame, setDemoGame] = useState(() => createGame(demoPlayers, "DEMO1"));
   const demoMe = demoPlayers[0];
@@ -568,7 +535,7 @@ function DemoGame() {
 }
 
 function SoloGame({ profile, difficulty, onLeave }) {
-  const bot = useMemo(() => ({ id: `bot-${difficulty}`, name: "보석콩 BOT", avatar: "diamond", isBot: true, difficulty }), [difficulty]);
+  const bot = useMemo(() => ({ id: `bot-${difficulty}`, name: "보석콩 BOT", avatar: "momonga", isBot: true, difficulty }), [difficulty]);
   const [game, setGame] = useState(() => createGame([profile, bot], `SOLO-${difficulty.toUpperCase()}`));
   const [error, setError] = useState("");
 
