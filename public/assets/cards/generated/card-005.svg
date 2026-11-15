@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1" gradientTransform="rotate(115 .5 .5)"><stop offset="0" stop-color="#e9d2ff"/><stop offset="1" stop-color="#c5f1ed"/></linearGradient><filter id="soft"><feGaussianBlur stdDeviation=".25"/></filter></defs>
+  <rect width="100" height="100" rx="16" fill="url(#g)"/>
+  <image xlink:href="../bg-ramen.png" x="-7.25" y="-4.25" width="123" height="123" preserveAspectRatio="xMidYMid slice" opacity=".96" filter="url(#soft)"/>
+  <rect width="100" height="100" rx="16" fill="url(#g)" opacity=".2" style="mix-blend-mode:soft-light"/>
+  <path d="M0 70 Q25 50 50 70 T100 70 V100 H0Z" fill="#c5f1ed" opacity=".36"/><circle cx="18" cy="20" r="5" fill="white" opacity=".7"/>
+  <path d="M0 92 Q24 85 50 92 T100 92" fill="none" stroke="white" stroke-width="1.5" opacity=".34"/>
+  </svg>
