@@ -107,6 +107,44 @@ test("아이패드 가로 화면에서 스크롤 없이 게임판 전체와 플�
   await expect(page.locator(".player-panel .asset-card[aria-label*='카드']")).toHaveCount(10);
 });
 
+test("방장이 화면을 벗어나 페이지가 다시 로드돼도 서버의 같은 방을 복구한다", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "서버 방 복구는 데스크톱 프로젝트에서 한 번 확인합니다.");
+  await page.getByPlaceholder("이름을 적어주세요").fill("복귀테스트");
+  await page.getByRole("button", { name: /새 방 만들기/ }).click();
+  const roomCode = page.locator(".room-code span");
+  await expect(roomCode).toBeVisible({ timeout: 15_000 });
+  const before = await roomCode.textContent();
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("gemfriends-session"))?.role)).toBe("host");
+  expect(await page.evaluate(() => Boolean(JSON.parse(localStorage.getItem("gemfriends-session"))?.sessionToken))).toBe(true);
+  await page.reload({ waitUntil: "networkidle" });
+  await expect(roomCode).toHaveText(before, { timeout: 15_000 });
+});
+
+test("서로 다른 4대의 클라이언트가 한 방에 들어와 같은 게임 상태를 받는다", async ({ browser }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "4인 서버 동기화는 데스크톱 프로젝트에서 한 번 확인합니다.");
+  const contexts = await Promise.all(Array.from({ length: 4 }, () => browser.newContext({ viewport: { width: 390, height: 844 } })));
+  try {
+    const pages = await Promise.all(contexts.map((context) => context.newPage()));
+    await Promise.all(pages.map((page) => page.goto("http://127.0.0.1:4173/")));
+    await pages[0].getByPlaceholder("이름을 적어주세요").fill("방장친구");
+    await pages[0].getByRole("button", { name: /새 방 만들기/ }).click();
+    const roomCode = await pages[0].locator(".room-code span").textContent({ timeout: 10_000 });
+    for (let index = 1; index < pages.length; index += 1) {
+      await pages[index].getByPlaceholder("이름을 적어주세요").fill(`참가친구${index}`);
+      await pages[index].getByLabel("방 코드").fill(roomCode);
+      await pages[index].getByRole("button", { name: /^입장/ }).click();
+    }
+    await expect(pages[0].getByRole("button", { name: "4명으로 시작하기" })).toBeVisible({ timeout: 15_000 });
+    await pages[0].getByRole("button", { name: "4명으로 시작하기" }).click();
+    await Promise.all(pages.map((page) => expect(page.locator(".game-shell")).toBeVisible({ timeout: 15_000 })));
+    const roomCodes = await Promise.all(pages.map((page) => page.locator(".room-chip").textContent()));
+    expect(new Set(roomCodes)).toEqual(new Set([roomCode]));
+    await Promise.all(pages.map((page) => expect(page.locator(".player-panel")).toHaveCount(4)));
+  } finally {
+    await Promise.all(contexts.map((context) => context.close()));
+  }
+});
+
 test("90장 카드 파일이 브라우저에서도 전부 로드된다", async ({ page }) => {
   const paths = Array.from({ length: 90 }, (_, index) => `/assets/cards/generated/card-${String(index).padStart(3, "0")}.jpg`);
   const results = await page.evaluate(async (sources) => Promise.all(sources.map((source) => new Promise((resolve) => {

@@ -11,10 +11,8 @@ import {
   playerBonuses,
   playerScore,
   tokenTotal,
-  viewFor,
 } from "./game.js";
 import { BOT_LEVELS, chooseBotAction, playTimedTurn } from "./bot.js";
-import { openGuestLink, openHostLink } from "./net.js";
 import { EMOTES, mascotLine, reactionFor } from "./mascots.js";
 import TutorialDialog from "./Tutorial.jsx";
 
@@ -29,24 +27,15 @@ const AVATARS = {
 const LEGACY_AVATARS = { ruby: "chiikawa", sapphire: "hachiware", emerald: "usagi", diamond: "momonga" };
 
 const makeId = () => crypto.randomUUID();
-const makeRoomCode = () => {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  return Array.from({ length: 5 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
-};
-
 const SESSION_KEY = "gemfriends-session";
-const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const loadSession = () => {
   try {
     const session = JSON.parse(localStorage.getItem(SESSION_KEY));
-    return session && Date.now() - session.savedAt < SESSION_TTL_MS ? session : null;
+    if (!session?.roomCode || !session?.profile || !session?.sessionToken || Date.now() - session.savedAt >= SESSION_TTL_MS) return null;
+    return session;
   } catch { return null; }
 };
-const publicProfile = ({ key, ...rest }) => rest; // 본인 확인용 key는 다른 사람에게 보내지 않아요.
-const MSG_NOTFOUND = "방을 찾지 못했어요. 코드가 맞는지, 방장이 방 화면에 있는지 확인해주세요.";
-const MSG_SERVER = "연결 서버에 닿지 못했어요. 인터넷 연결을 확인하고 다시 시도해주세요.";
-const BEAT_MS = 4000;
-const HOST_SILENT_MS = 12000;
 
 function useMultiplayer() {
   const [mode, setMode] = useState("landing");
@@ -57,247 +46,169 @@ function useMultiplayer() {
   const [connectionState, setConnectionState] = useState("idle");
   const [connectStatus, setConnectStatus] = useState("");
   const [emote, setEmote] = useState(null);
-  const emoteAtRef = useRef(new Map());
-  const linkRef = useRef(null);
   const profileRef = useRef(null);
-  const isHostRef = useRef(false);
   const lobbyRef = useRef(null);
   const gameRef = useRef(null);
-  const sessionRef = useRef(null); // 연결이 한 번이라도 성립한 방. 있으면 끊겨도 계속 복구를 시도해요.
-  const keysRef = useRef(new Map()); // 방장 전용: 플레이어 id → 본인 확인 key
-  const seenRef = useRef(new Map()); // 방장 전용: 플레이어 id → 마지막 신호 시각
-  const revRef = useRef(0);
-  const guestRevRef = useRef(null);
-  const lastSeenRef = useRef(0);
-  const joinedRef = useRef(false);
-  const downSinceRef = useRef(0);
-  const lastRebuildRef = useRef(0);
-  const hostIndexRef = useRef(0);
-  const generationRef = useRef(0); // 낡은 연결에서 늦게 도착한 콜백을 무시하기 위한 번호
-  const tickRef = useRef(() => {});
+  const roomCodeRef = useRef("");
+  const sessionTokenRef = useRef("");
+  const versionRef = useRef(0);
+  const stoppedRef = useRef(true);
+  const pollTimerRef = useRef(null);
+  const heartbeatTimerRef = useRef(null);
+  const actionInFlightRef = useRef(false);
+  const emoteIdRef = useRef(null);
 
-  const setLobbyState = useCallback((next) => { lobbyRef.current = next; setLobby(next); }, []);
-  const setGameState = useCallback((next) => { gameRef.current = next; setGame(next); }, []);
-
-  // 새로 고침이나 앱 전환 뒤에도 같은 방으로 돌아올 수 있게 방 상태를 저장해요.
-  useEffect(() => {
-    if (!roomCode || !profileRef.current) return;
+  const persistRoom = useCallback((overrides = {}) => {
+    if (!roomCodeRef.current || !profileRef.current || !sessionTokenRef.current) return;
     localStorage.setItem(SESSION_KEY, JSON.stringify({
-      isHost: isHostRef.current, roomCode, profile: profileRef.current, lobby, game,
-      keys: Object.fromEntries(keysRef.current), savedAt: Date.now(),
+      isHost: lobbyRef.current?.hostId === profileRef.current.id,
+      role: lobbyRef.current?.hostId === profileRef.current.id ? "host" : "guest",
+      roomCode: roomCodeRef.current,
+      profile: profileRef.current,
+      sessionToken: sessionTokenRef.current,
+      lobby: lobbyRef.current,
+      game: gameRef.current,
+      savedAt: Date.now(),
+      ...overrides,
     }));
-  }, [roomCode, lobby, game]);
-
-  const closeLink = useCallback(() => {
-    generationRef.current += 1;
-    linkRef.current?.close();
-    linkRef.current = null;
   }, []);
-  useEffect(() => closeLink, [closeLink]);
 
-  // ---------- 방장 ----------
-  const sendTo = useCallback((id, message) => linkRef.current?.sendTo?.(id, { ...message, rev: revRef.current }), []);
-  const sendLobbyTo = useCallback((id) => sendTo(id, { type: "lobby", lobby: lobbyRef.current }), [sendTo]);
-  const sendGameTo = useCallback((id) => { if (gameRef.current) sendTo(id, { type: "game", game: viewFor(gameRef.current, id) }); }, [sendTo]);
-  const sendStateTo = useCallback((id) => { sendLobbyTo(id); sendGameTo(id); }, [sendGameTo, sendLobbyTo]);
-  const guestIds = () => (lobbyRef.current?.players || []).map((player) => player.id).filter((id) => id !== profileRef.current?.id);
+  const setLobbyState = useCallback((next) => { lobbyRef.current = next; setLobby(next); persistRoom({ lobby: next }); }, [persistRoom]);
+  const setGameState = useCallback((next) => { gameRef.current = next; setGame(next); persistRoom({ game: next }); }, [persistRoom]);
 
-  const publishLobby = useCallback((next) => {
-    revRef.current += 1;
-    setLobbyState(next);
-    guestIds().forEach(sendLobbyTo);
-  }, [sendLobbyTo, setLobbyState]);
+  const cleanup = useCallback(() => {
+    stoppedRef.current = true;
+    clearTimeout(pollTimerRef.current);
+    clearTimeout(heartbeatTimerRef.current);
+  }, []);
+  useEffect(() => cleanup, [cleanup]);
 
-  const publishGame = useCallback((next) => {
-    revRef.current += 1;
-    setGameState(next);
-    guestIds().forEach(sendGameTo);
-  }, [sendGameTo, setGameState]);
-
-  const runAction = useCallback((playerId, action, replyTo = null) => {
-    try {
-      publishGame(applyAction(gameRef.current, playerId, action));
-    } catch (actionError) {
-      const message = actionError instanceof Error ? actionError.message : "행동을 처리하지 못했어요.";
-      if (replyTo) sendTo(replyTo, { type: "error", message });
-      else setError(message);
+  const api = useCallback(async (body) => {
+    const response = await fetch("/api/rooms", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      cache: "no-store",
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const requestError = new Error(payload.error || "서버와 연결하지 못했어요.");
+      requestError.code = payload.code;
+      requestError.status = response.status;
+      throw requestError;
     }
-  }, [publishGame, sendTo]);
-
-  // 감정표현: 방장이 받아서 모두에게 전해요. 연타는 0.8초에 한 번으로 막아요.
-  const emitEmote = useCallback((playerId, key) => {
-    if (!EMOTES.some((item) => item.key === key)) return;
-    const now = Date.now();
-    if (now - (emoteAtRef.current.get(playerId) || 0) < 800) return;
-    emoteAtRef.current.set(playerId, now);
-    setEmote({ id: now, playerId, key });
-    guestIds().filter((id) => id !== playerId).forEach((id) => linkRef.current?.sendTo?.(id, { type: "emote", playerId, key }));
+    return payload;
   }, []);
 
-  const onGuestMessage = useCallback((message) => {
-    if (!isHostRef.current || !message || typeof message !== "object") return;
-    const current = lobbyRef.current;
-    const id = message.from || message.profile?.id;
-    if (!current || !id || !message.key) return;
-    const known = current.players.some((player) => player.id === id);
-    const knownKey = keysRef.current.get(id);
-    if (knownKey && knownKey !== message.key) { sendTo(id, { type: "error", message: "이미 다른 기기가 쓰고 있는 자리예요." }); return; }
-    seenRef.current.set(id, Date.now());
+  const applyServerState = useCallback((payload) => {
+    if (payload.emote?.id && payload.emote.id !== emoteIdRef.current) {
+      emoteIdRef.current = payload.emote.id;
+      setEmote(payload.emote);
+    }
+    if (payload.unchanged) return;
+    if (payload.sessionToken) sessionTokenRef.current = payload.sessionToken;
+    if (payload.version) versionRef.current = payload.version;
+    if (payload.lobby) {
+      roomCodeRef.current = payload.lobby.roomCode;
+      setRoomCode(payload.lobby.roomCode);
+      setLobbyState(payload.lobby);
+    }
+    if (Object.hasOwn(payload, "game")) setGameState(payload.game);
+    if (payload.game) setMode("game");
+    else if (payload.lobby) setMode("lobby");
+    persistRoom();
+  }, [persistRoom, setGameState, setLobbyState]);
 
-    if (message.type === "join") {
-      const profile = message.profile;
-      if (!profile?.name) return;
-      if (current.status !== "waiting") {
-        // 게임 중 끊겼던 플레이어는 같은 자리로 다시 들어와요.
-        if (known && knownKey === message.key) sendStateTo(id);
-        else sendTo(id, { type: "error", message: "이미 게임이 시작된 방이에요.", fatal: true });
-        return;
+  const credentials = useCallback(() => ({
+    code: roomCodeRef.current,
+    playerId: profileRef.current?.id,
+    sessionToken: sessionTokenRef.current,
+  }), []);
+
+  const syncOnce = useCallback(async () => {
+    if (!roomCodeRef.current || !profileRef.current || !sessionTokenRef.current) return;
+    const payload = await api({ op: "sync", ...credentials(), knownVersion: versionRef.current });
+    applyServerState(payload);
+    setConnectionState("connected");
+    setConnectStatus("");
+  }, [api, applyServerState, credentials]);
+
+  const beginSync = useCallback(() => {
+    stoppedRef.current = false;
+    clearTimeout(pollTimerRef.current);
+    clearTimeout(heartbeatTimerRef.current);
+    const poll = async () => {
+      if (stoppedRef.current) return;
+      try { await syncOnce(); }
+      catch (syncError) {
+        if (["SESSION_EXPIRED", "ROOM_NOT_FOUND"].includes(syncError.code)) {
+          cleanup();
+          localStorage.removeItem(SESSION_KEY);
+          setMode("landing");
+          setError(syncError.message);
+          setConnectionState("error");
+          return;
+        }
+        setConnectionState("reconnecting");
       }
-      if (!known && current.players.length >= 4) { sendTo(id, { type: "error", message: "방이 가득 찼어요.", fatal: true }); return; }
-      keysRef.current.set(id, message.key);
-      const clean = { ...publicProfile(profile), connected: true };
-      const players = known ? current.players.map((player) => (player.id === id ? clean : player)) : [...current.players, clean];
-      publishLobby({ ...current, players });
-      return;
-    }
-    if (!known) return;
-    if (message.type === "action") runAction(id, message.action, id);
-    else if (message.type === "sync") sendStateTo(id);
-    else if (message.type === "emote") emitEmote(id, message.emote);
-    else if (message.type === "leave" && current.status === "waiting") {
-      keysRef.current.delete(id);
-      publishLobby({ ...current, players: current.players.filter((player) => player.id !== id) });
-    }
-  }, [emitEmote, publishLobby, runAction, sendStateTo, sendTo]);
+      pollTimerRef.current = setTimeout(poll, document.visibilityState === "visible" ? 1200 : 3000);
+    };
+    const heartbeat = async () => {
+      if (stoppedRef.current || !profileRef.current) return;
+      try { await api({ op: "heartbeat", ...credentials() }); }
+      catch { /* 폴링이 연결 상태를 계속 복구해요. */ }
+      heartbeatTimerRef.current = setTimeout(heartbeat, 12_000);
+    };
+    poll();
+    heartbeat();
+  }, [api, cleanup, credentials, syncOnce]);
 
-  const hostRoom = useCallback(async (profile, resume = null) => {
-    closeLink();
-    const generation = generationRef.current;
-    const code = resume?.roomCode || makeRoomCode();
+  const enterRoom = useCallback((profile, payload) => {
     profileRef.current = profile;
-    isHostRef.current = true;
-    joinedRef.current = false;
-    if (resume) {
-      sessionRef.current = { isHost: true, code, profile };
-      keysRef.current = new Map(Object.entries(resume.keys || {}));
-      setRoomCode(code);
-      setLobbyState(resume.lobby);
-      setGameState(resume.game);
-      setMode(resume.game ? "game" : "lobby");
-    }
+    sessionTokenRef.current = payload.sessionToken;
+    roomCodeRef.current = payload.lobby.roomCode;
+    applyServerState(payload);
+    setConnectionState("connected");
+    setConnectStatus("");
+    setError("");
+    history.replaceState(null, "", `?room=${payload.lobby.roomCode}`);
+    persistRoom();
+    beginSync();
+  }, [applyServerState, beginSync, persistRoom]);
+
+  const hostRoom = useCallback(async (profile) => {
+    cleanup();
+    localStorage.removeItem(SESSION_KEY);
+    setConnectionState("connecting");
+    setConnectStatus("안전한 서버 방을 만드는 중…");
+    try { enterRoom(profile, await api({ op: "create", profile })); }
+    catch (requestError) { setError(requestError.message); setConnectionState("error"); setConnectStatus(""); }
+  }, [api, cleanup, enterRoom]);
+
+  const joinRoom = useCallback(async (profile, rawCode, resume = null) => {
+    const code = rawCode.trim().toUpperCase();
+    if (code.length !== 5) { setError("5자리 방 코드를 확인해주세요."); return; }
+    cleanup();
+    if (!resume) localStorage.removeItem(SESSION_KEY);
     setConnectionState(resume ? "reconnecting" : "connecting");
-    setConnectStatus("방을 만드는 중…");
-    revRef.current = Date.now();
+    setConnectStatus("서버의 방을 찾는 중…");
     try {
-      const link = await openHostLink({
-        code, startIndex: hostIndexRef.current, onMessage: onGuestMessage,
-        onChange: (ready) => { if (generationRef.current === generation) downSinceRef.current = ready ? 0 : (downSinceRef.current || Date.now()); },
-      });
-      if (generationRef.current !== generation) { link.close(); return; }
-      linkRef.current = link;
-      hostIndexRef.current = link.index;
-      downSinceRef.current = 0;
-      sessionRef.current = { isHost: true, code, profile };
-      if (!lobbyRef.current) {
-        setRoomCode(code);
-        setLobbyState({ roomCode: code, status: "waiting", hostId: profile.id, players: [{ ...publicProfile(profile), connected: true }] });
-        setMode("lobby");
-      }
-      setConnectionState("connected");
-      setConnectStatus("");
-      history.replaceState(null, "", `?room=${code}`);
-      link.beat({ type: "beat", rev: revRef.current });
-    } catch {
-      if (generationRef.current !== generation) return;
-      if (lobbyRef.current) { hostIndexRef.current += 1; return; } // 이미 열린 방은 감시 타이머가 다시 시도해요.
-      closeLink();
-      setError("방을 열지 못했어요. 인터넷 연결을 확인하고 다시 시도해주세요.");
+      const payload = await api({ op: "join", code, profile, sessionToken: resume?.sessionToken || "" });
+      enterRoom(profile, payload);
+    } catch (requestError) {
+      if (resume) localStorage.removeItem(SESSION_KEY);
+      setMode("landing");
+      setError(requestError.message);
       setConnectionState("error");
       setConnectStatus("");
     }
-  }, [closeLink, onGuestMessage, setGameState, setLobbyState]);
-
-  // ---------- 친구 ----------
-  const joinRoom = useCallback((profile, rawCode, resume = null) => {
-    closeLink();
-    const generation = generationRef.current;
-    const code = rawCode.trim().toUpperCase();
-    if (code.length !== 5) { setError("5자리 방 코드를 확인해주세요."); return; }
-    profileRef.current = profile;
-    isHostRef.current = false;
-    joinedRef.current = Boolean(resume);
-    lastSeenRef.current = Date.now();
-    guestRevRef.current = null;
-    if (resume) {
-      sessionRef.current = { isHost: false, code, profile };
-      setRoomCode(code);
-      setLobbyState(resume.lobby);
-      setGameState(resume.game);
-      setMode(resume.game ? "game" : "lobby");
-    }
-    setConnectionState(resume ? "reconnecting" : "connecting");
-    setConnectStatus("연결 서버에 접속하는 중…");
-
-    const link = openGuestLink({
-      code, id: profile.id,
-      onMessage: (message) => {
-        if (generationRef.current !== generation || !message || typeof message !== "object") return;
-        lastSeenRef.current = Date.now();
-        if (message.type === "beat") {
-          if (joinedRef.current) { setConnectionState("connected"); if (message.rev !== guestRevRef.current) sendUp({ type: "sync" }); }
-          return;
-        }
-        if (message.type === "error") {
-          setError(message.message);
-          if (message.fatal) { sessionRef.current = null; closeLink(); setConnectionState("error"); setConnectStatus(""); if (!gameRef.current) setMode("landing"); }
-          return;
-        }
-        if (message.type === "emote") { setEmote({ id: Date.now(), playerId: message.playerId, key: message.key }); return; }
-        if (message.type !== "lobby" && message.type !== "game") return;
-        guestRevRef.current = message.rev;
-        if (!joinedRef.current || sessionRef.current?.code !== code) {
-          joinedRef.current = true;
-          sessionRef.current = { isHost: false, code, profile };
-          setRoomCode(code);
-          history.replaceState(null, "", `?room=${code}`);
-        }
-        if (message.type === "lobby") setLobbyState(message.lobby);
-        if (message.type === "game") { setGameState(message.game); setMode("game"); } else if (!gameRef.current) setMode("lobby");
-        setConnectionState("connected");
-        setConnectStatus("");
-      },
-      onChange: (connected) => {
-        if (generationRef.current !== generation) return;
-        if (connected) { downSinceRef.current = 0; sendUp({ type: "join", profile: publicProfile(profile) }); } else downSinceRef.current ||= Date.now();
-      },
-    });
-    linkRef.current = link;
-    function sendUp(message) { return link.publish({ ...message, from: profile.id, key: profile.key }); }
-    linkRef.current.sendUp = sendUp;
-
-    // 처음 입장은 방장의 응답을 기다리다가 3번 두드려보고 안 되면 알려줘요.
-    if (!resume) {
-      let tries = 0;
-      const knock = () => {
-        if (generationRef.current !== generation || joinedRef.current) return;
-        tries += 1;
-        if (tries > 4) {
-          closeLink(); setError(link.connected() ? MSG_NOTFOUND : MSG_SERVER); setConnectionState("error"); setConnectStatus("");
-          return;
-        }
-        setConnectStatus(!link.connected() ? "연결 서버에 접속하는 중…" : tries > 1 ? `방장을 찾는 중… (${tries}/4)` : "방장을 찾는 중…");
-        if (link.connected()) sendUp({ type: "join", profile: publicProfile(profile) });
-        setTimeout(knock, 3500);
-      };
-      setTimeout(knock, 1500);
-    }
-  }, [closeLink, setGameState, setLobbyState]);
+  }, [api, cleanup, enterRoom]);
 
   const resumeSaved = useCallback(() => {
     const session = loadSession();
     if (!session) return;
-    if (session.isHost) hostRoom(session.profile, session); else joinRoom(session.profile, session.roomCode, session);
-  }, [hostRoom, joinRoom]);
+    joinRoom(session.profile, session.roomCode, session);
+  }, [joinRoom]);
 
   // 탭이 새로 고쳐졌어도 주소의 방 코드가 저장된 방과 같으면 그 방으로 돌아가요.
   useEffect(() => {
@@ -308,110 +219,78 @@ function useMultiplayer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---------- 감시 타이머 ----------
-  const rebuild = useCallback((force = false) => {
-    const session = sessionRef.current;
-    if (!session || !lobbyRef.current) return;
-    const now = Date.now();
-    if (!force && now - lastRebuildRef.current < 6000) return;
-    lastRebuildRef.current = now;
-    downSinceRef.current = 0;
-    if (session.isHost) { hostIndexRef.current += 1; hostRoom(session.profile, { roomCode: session.code, lobby: lobbyRef.current, game: gameRef.current, keys: Object.fromEntries(keysRef.current) }); }
-    else joinRoom(session.profile, session.code, { lobby: lobbyRef.current, game: gameRef.current });
-  }, [hostRoom, joinRoom]);
-
   useEffect(() => {
-    const tick = () => {
-      const session = sessionRef.current;
-      const link = linkRef.current;
-      if (!session) return;
-      if (!link) { rebuild(); return; }
-      // 서버와 12초 넘게 끊겨 있으면 (방장은 다른 서버로) 연결을 새로 만들어요.
-      if (!link.connected() && downSinceRef.current && Date.now() - downSinceRef.current > 12000) { rebuild(true); return; }
-      if (session.isHost) {
-        link.beat({ type: "beat", rev: revRef.current });
-        const current = lobbyRef.current;
-        // 대기실에서 신호가 25초 넘게 없는 친구는 자리를 비워줘요.
-        if (current?.status === "waiting") {
-          const gone = current.players.filter((player) => player.id !== profileRef.current?.id && Date.now() - (seenRef.current.get(player.id) || 0) > 25000);
-          if (gone.length) publishLobby({ ...current, players: current.players.filter((player) => !gone.includes(player)) });
-        }
-        return;
-      }
-      if (!link.connected()) return;
-      link.sendUp?.({ type: joinedRef.current ? "hb" : "join", profile: publicProfile(profileRef.current) });
-      // 방장 신호가 12초 넘게 없으면 끊긴 걸로 보고 알려요. 신호가 다시 오면 알아서 돌아와요.
-      if (joinedRef.current && Date.now() - lastSeenRef.current > HOST_SILENT_MS) {
-        setConnectionState("reconnecting");
-        link.sendUp({ type: "join", profile: publicProfile(profileRef.current) });
-      }
+    const wake = () => {
+      if (document.visibilityState === "hidden" || !roomCodeRef.current) return;
+      setConnectionState("reconnecting");
+      api({ op: "heartbeat", ...credentials() }).catch(() => undefined).finally(() => syncOnce().catch(() => undefined));
     };
-    tickRef.current = tick;
-    const interval = setInterval(tick, BEAT_MS);
-    const wake = () => { if (document.visibilityState !== "hidden") tick(); };
     document.addEventListener("visibilitychange", wake);
-    window.addEventListener("online", tick);
-    window.addEventListener("pageshow", tick);
+    window.addEventListener("online", wake);
+    window.addEventListener("pageshow", wake);
     return () => {
-      clearInterval(interval);
       document.removeEventListener("visibilitychange", wake);
-      window.removeEventListener("online", tick);
-      window.removeEventListener("pageshow", tick);
+      window.removeEventListener("online", wake);
+      window.removeEventListener("pageshow", wake);
     };
-  }, [publishLobby, rebuild]);
+  }, [api, credentials, syncOnce]);
 
-  // 방장 타이머: 30초 안에 행동이 없으면 자동 진행해요.
-  useEffect(() => {
-    if (!isHostRef.current || game?.status !== "playing" || !game.turnDeadline) return undefined;
-    const deadline = game.turnDeadline;
-    const timer = setTimeout(() => {
-      const current = gameRef.current;
-      if (!current || current.status !== "playing" || current.turnDeadline !== deadline) return;
-      try { publishGame(playTimedTurn(current, current.players[current.turn].id)); }
-      catch { /* 다음 동기화에서 다시 시도할 수 있도록 게임 상태를 유지해요. */ }
-    }, Math.max(0, deadline - Date.now()) + 30);
-    return () => clearTimeout(timer);
-  }, [game?.status, game?.turnDeadline, publishGame]);
+  const retryNow = useCallback(() => {
+    setConnectionState("reconnecting");
+    if (stoppedRef.current) beginSync(); else syncOnce().catch(() => undefined);
+  }, [beginSync, syncOnce]);
 
-  const retryNow = useCallback(() => rebuild(true), [rebuild]);
+  const startGame = useCallback(async () => {
+    if (!profileRef.current || lobbyRef.current?.hostId !== profileRef.current.id || lobbyRef.current.players.length < 2) return;
+    try { applyServerState(await api({ op: "start", ...credentials() })); }
+    catch (requestError) { setError(requestError.message); }
+  }, [api, applyServerState, credentials]);
 
-  const startGame = useCallback(() => {
-    if (!isHostRef.current || lobbyRef.current.players.length < 2) return;
-    const nextLobby = { ...lobbyRef.current, status: "playing" };
-    publishLobby(nextLobby);
-    publishGame(createGame(nextLobby.players, nextLobby.roomCode));
-    setMode("game");
-  }, [publishGame, publishLobby]);
+  const rematch = useCallback(async () => {
+    if (!profileRef.current || lobbyRef.current?.hostId !== profileRef.current.id || gameRef.current?.status !== "finished") return;
+    try { applyServerState(await api({ op: "rematch", ...credentials() })); }
+    catch (requestError) { setError(requestError.message); }
+  }, [api, applyServerState, credentials]);
 
-  // 다시하기: 같은 방·같은 친구들로 새 판을 시작해요. 시작 순서는 한 칸씩 돌아가요.
-  const rematch = useCallback(() => {
-    const current = lobbyRef.current;
-    if (!isHostRef.current || !current || gameRef.current?.status !== "finished") return;
-    const players = [...current.players.slice(1), current.players[0]];
-    publishLobby({ ...current, players });
-    publishGame(createGame(players, current.roomCode, `${current.roomCode}-${Date.now()}`));
-  }, [publishGame, publishLobby]);
-
-  const sendAction = useCallback((action) => {
+  const sendAction = useCallback(async (action) => {
     const playerId = profileRef.current?.id;
-    if (!playerId) return;
-    if (isHostRef.current) runAction(playerId, action);
-    else if (!linkRef.current?.sendUp?.({ type: "action", action })) setError("다시 연결하는 중이에요. 잠시 후 눌러주세요.");
-  }, [runAction]);
+    if (!playerId || actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
+    const request = { op: "action", ...credentials(), actionId: makeId(), action };
+    try {
+      let payload;
+      try { payload = await api(request); }
+      catch (requestError) {
+        if (requestError.status) throw requestError;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        payload = await api(request);
+      }
+      applyServerState(payload);
+    } catch (requestError) {
+      if (requestError.code === "VERSION_CONFLICT") await syncOnce().catch(() => undefined);
+      setError(requestError.message);
+    } finally { actionInFlightRef.current = false; }
+  }, [api, applyServerState, credentials, syncOnce]);
 
-  const sendEmote = useCallback((key) => {
+  const sendEmote = useCallback(async (key) => {
     const playerId = profileRef.current?.id;
-    if (!playerId) return;
-    if (isHostRef.current) { emitEmote(playerId, key); return; }
-    setEmote({ id: Date.now(), playerId, key });
-    linkRef.current?.sendUp?.({ type: "emote", emote: key }); // key는 본인 확인용 이름이라 emote로 보내요.
-  }, [emitEmote]);
+    if (!playerId || !EMOTES.some((item) => item.key === key)) return;
+    const optimistic = { id: `${Date.now()}-${playerId}`, playerId, key };
+    emoteIdRef.current = optimistic.id;
+    setEmote(optimistic);
+    try { applyServerState(await api({ op: "emote", ...credentials(), key, emoteId: optimistic.id })); }
+    catch { /* 감정표현 실패는 게임 진행을 막지 않아요. */ }
+  }, [api, applyServerState, credentials]);
 
   const leave = useCallback(() => {
-    if (!isHostRef.current) linkRef.current?.sendUp?.({ type: "leave" });
-    sessionRef.current = null;
-    closeLink();
+    const current = credentials();
+    cleanup();
+    if (current.code && current.playerId) api({ op: "leave", ...current }).catch(() => undefined);
     localStorage.removeItem(SESSION_KEY);
+    roomCodeRef.current = "";
+    sessionTokenRef.current = "";
+    versionRef.current = 0;
+    profileRef.current = null;
     setMode("landing");
     setLobbyState(null);
     setGameState(null);
@@ -420,11 +299,11 @@ function useMultiplayer() {
     setConnectionState("idle");
     setConnectStatus("");
     history.replaceState(null, "", location.pathname);
-  }, [closeLink, setGameState, setLobbyState]);
+  }, [api, cleanup, credentials, setGameState, setLobbyState]);
 
   return {
     mode, roomCode, lobby, game, error, setError, connectionState, connectStatus, emote, sendEmote,
-    me: profileRef.current, isHost: isHostRef.current,
+    me: profileRef.current, isHost: Boolean(profileRef.current && lobby?.hostId === profileRef.current.id),
     hostRoom, joinRoom, resumeSaved, startGame, rematch, sendAction, leave, retryNow,
   };
 }
