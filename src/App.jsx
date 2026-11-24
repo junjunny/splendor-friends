@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BookOpenCheck, Bot, Check, ChevronRight, Clock3, Copy, Crown, Gem, HelpCircle, LockKeyhole, LogOut, Play, RotateCcw, Share2, Sparkles, Users, X } from "lucide-react";
+import { BookOpenCheck, Bot, Check, CheckCircle2, ChevronRight, Circle, Clock3, Copy, Crown, Gem, HelpCircle, Hourglass, LockKeyhole, LogOut, MessageCircle, Play, RotateCcw, Share2, Sparkles, Star, Users, WifiOff, X } from "lucide-react";
 import {
   ALL_TOKENS,
   COLORS,
@@ -13,7 +13,7 @@ import {
   tokenTotal,
 } from "./game.js";
 import { BOT_LEVELS, chooseBotAction, playTimedTurn } from "./bot.js";
-import { EMOTES, mascotLine, reactionFor } from "./mascots.js";
+import { EMOTES, QUICK_CHATS, mascotLine, reactionFor } from "./mascots.js";
 import TutorialDialog from "./Tutorial.jsx";
 
 const AVATARS = {
@@ -46,12 +46,14 @@ function useMultiplayer() {
   const [connectionState, setConnectionState] = useState("idle");
   const [connectStatus, setConnectStatus] = useState("");
   const [emote, setEmote] = useState(null);
+  const [rematchPending, setRematchPending] = useState(false);
   const profileRef = useRef(null);
   const lobbyRef = useRef(null);
   const gameRef = useRef(null);
   const roomCodeRef = useRef("");
   const sessionTokenRef = useRef("");
   const versionRef = useRef(0);
+  const gameVersionRef = useRef(-1);
   const stoppedRef = useRef(true);
   const pollTimerRef = useRef(null);
   const heartbeatTimerRef = useRef(null);
@@ -107,15 +109,17 @@ function useMultiplayer() {
     }
     if (payload.unchanged) return;
     if (payload.sessionToken) sessionTokenRef.current = payload.sessionToken;
-    if (payload.version) versionRef.current = payload.version;
+    if (payload.version !== undefined) versionRef.current = payload.version;
+    if (payload.gameVersion !== undefined) gameVersionRef.current = payload.gameVersion;
     if (payload.lobby) {
       roomCodeRef.current = payload.lobby.roomCode;
       setRoomCode(payload.lobby.roomCode);
       setLobbyState(payload.lobby);
     }
-    if (Object.hasOwn(payload, "game")) setGameState(payload.game);
-    if (payload.game) setMode("game");
-    else if (payload.lobby) setMode("lobby");
+    if (Object.hasOwn(payload, "game")) {
+      setGameState(payload.game);
+      setMode(payload.game ? "game" : "lobby");
+    } else if (payload.lobby && !gameRef.current) setMode("lobby");
     persistRoom();
   }, [persistRoom, setGameState, setLobbyState]);
 
@@ -127,7 +131,7 @@ function useMultiplayer() {
 
   const syncOnce = useCallback(async () => {
     if (!roomCodeRef.current || !profileRef.current || !sessionTokenRef.current) return;
-    const payload = await api({ op: "sync", ...credentials(), knownVersion: versionRef.current });
+    const payload = await api({ op: "sync", ...credentials(), knownVersion: versionRef.current, knownGameVersion: gameVersionRef.current });
     applyServerState(payload);
     setConnectionState("connected");
     setConnectStatus("");
@@ -248,9 +252,38 @@ function useMultiplayer() {
 
   const rematch = useCallback(async () => {
     if (!profileRef.current || lobbyRef.current?.hostId !== profileRef.current.id || gameRef.current?.status !== "finished") return;
-    try { applyServerState(await api({ op: "rematch", ...credentials() })); }
-    catch (requestError) { setError(requestError.message); }
-  }, [api, applyServerState, credentials]);
+    const request = { op: "rematch", ...credentials(), startRequestId: makeId() };
+    setRematchPending(true);
+    try {
+      let payload;
+      try { payload = await api(request); }
+      catch (requestError) {
+        if (requestError.status) throw requestError;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        payload = await api(request);
+      }
+      applyServerState(payload);
+    } catch (requestError) {
+      await syncOnce().catch(() => undefined);
+      setError(requestError.message);
+    } finally { setRematchPending(false); }
+  }, [api, applyServerState, credentials, syncOnce]);
+
+  const setStatus = useCallback(async (status) => {
+    if (!profileRef.current) return;
+    const request = { op: "status", ...credentials(), eventId: makeId(), ...status };
+    try {
+      let payload;
+      try { payload = await api(request); }
+      catch (requestError) {
+        if (requestError.status && requestError.code !== "VERSION_CONFLICT") throw requestError;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        payload = await api(request);
+      }
+      applyServerState(payload);
+    }
+    catch (requestError) { await syncOnce().catch(() => undefined); setError(requestError.message); }
+  }, [api, applyServerState, credentials, syncOnce]);
 
   const sendAction = useCallback(async (action) => {
     const playerId = profileRef.current?.id;
@@ -278,9 +311,18 @@ function useMultiplayer() {
     const optimistic = { id: `${Date.now()}-${playerId}`, playerId, key };
     emoteIdRef.current = optimistic.id;
     setEmote(optimistic);
-    try { applyServerState(await api({ op: "emote", ...credentials(), key, emoteId: optimistic.id })); }
-    catch { /* 감정표현 실패는 게임 진행을 막지 않아요. */ }
-  }, [api, applyServerState, credentials]);
+    const request = { op: "emote", ...credentials(), key, emoteId: optimistic.id };
+    try {
+      let payload;
+      try { payload = await api(request); }
+      catch (requestError) {
+        if (requestError.status && requestError.code !== "VERSION_CONFLICT") throw requestError;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        payload = await api(request);
+      }
+      applyServerState(payload);
+    } catch { await syncOnce().catch(() => undefined); /* 빠른 대화 실패는 게임 진행을 막지 않아요. */ }
+  }, [api, applyServerState, credentials, syncOnce]);
 
   const leave = useCallback(() => {
     const current = credentials();
@@ -290,6 +332,7 @@ function useMultiplayer() {
     roomCodeRef.current = "";
     sessionTokenRef.current = "";
     versionRef.current = 0;
+    gameVersionRef.current = -1;
     profileRef.current = null;
     setMode("landing");
     setLobbyState(null);
@@ -302,9 +345,9 @@ function useMultiplayer() {
   }, [api, cleanup, credentials, setGameState, setLobbyState]);
 
   return {
-    mode, roomCode, lobby, game, error, setError, connectionState, connectStatus, emote, sendEmote,
+    mode, roomCode, lobby, game, error, setError, connectionState, connectStatus, emote, sendEmote, rematchPending,
     me: profileRef.current, isHost: Boolean(profileRef.current && lobby?.hostId === profileRef.current.id),
-    hostRoom, joinRoom, resumeSaved, startGame, rematch, sendAction, leave, retryNow,
+    hostRoom, joinRoom, resumeSaved, startGame, rematch, setStatus, sendAction, leave, retryNow,
   };
 }
 
@@ -529,7 +572,7 @@ function ReservedChip({ card, hidden, mine, canBuy, onBuy }) {
     : <span className="reserved-chip" role="img" aria-label={`예약된 ${label}`}>{body}</span>;
 }
 
-function PlayerPanel({ player, active, me, canAct, onBuyReserved, bubble }) {
+function PlayerPanel({ player, active, me, canAct, onBuyReserved, bubble, roundId }) {
   const bonuses = playerBonuses(player);
   return (
     <section className={`player-panel ${active ? "active" : ""} ${me ? "me" : ""}`} aria-label={`${player.name} 현황`}>
@@ -537,6 +580,8 @@ function PlayerPanel({ player, active, me, canAct, onBuyReserved, bubble }) {
       <div className="player-head">
         <Avatar avatar={player.avatar} size="sm" />
         <strong>{player.name}{me ? " · 나" : ""}{player.isBot && <em>{BOT_LEVELS[player.difficulty]?.label || "BOT"}</em>}</strong>
+        {player.lastGameRoundId === roundId && <span className="last-game-badge"><Star size={11} fill="currentColor" /> 막판</span>}
+        {player.connected === false && <span className="offline-badge"><WifiOff size={11} /> 연결 중</span>}
         {active && <i>차례</i>}
         {player.nobles.length > 0 && <span className="noble-owned" title={`귀족 ${player.nobles.length}명 · ${player.nobles.length * 3}점`}><Crown size={14} />{player.nobles.length}</span>}
         <small className={`token-sum ${tokenTotal(player) >= 9 ? "near-limit" : ""}`} aria-label={`보석 ${tokenTotal(player)}개 보유, 최대 10개`}><Gem size={11} />{tokenTotal(player)}/10</small>
@@ -561,13 +606,14 @@ function PlayerPanel({ player, active, me, canAct, onBuyReserved, bubble }) {
   );
 }
 
-function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial, onRematch = null, rematchNote = "", emote = null, onEmote = null }) {
+function GameBoard({ game, lobby = null, me, roomCode, onAction, onLeave, onTutorial, onRematch = null, rematchPending = false, emote = null, onEmote = null, onStatus = null }) {
   const [bubbles, setBubbles] = useState({});
   const seenSeqRef = useRef(game.seq || 0);
   const seenEmoteRef = useRef(emote?.id);
   const [selectedTokens, setSelectedTokens] = useState([]);
   const [timeLeft, setTimeLeft] = useState(() => Math.max(0, Math.ceil((game.turnDeadline - Date.now()) / 1000)));
-  const player = game.players.find((item) => item.id === me?.id);
+  const lobbyById = useMemo(() => new Map((lobby?.players || []).map((item) => [item.id, item])), [lobby?.players]);
+  const player = { ...game.players.find((item) => item.id === me?.id), ...(lobbyById.get(me?.id) || {}) };
   const isMyTurn = game.status === "playing" && game.players[game.turn]?.id === me?.id;
   const canMainAction = isMyTurn && !game.pending;
 
@@ -658,14 +704,14 @@ function GameBoard({ game, me, roomCode, onAction, onLeave, onTutorial, onRematc
 
         <aside className="side-panel" aria-label="플레이어 현황">
           <div className="asset-legend"><span><i className="asset-card" /> 카드 보너스</span><span><i className="asset-token" /> 보석 토큰</span><span><Crown size={12} /> 귀족</span></div>
-          <div className="players-stack">{game.players.map((item, index) => <PlayerPanel key={item.id} player={item} active={index === game.turn && game.status !== "finished"} me={item.id === me?.id} canAct={canMainAction} onBuyReserved={(card) => buy(card, "reserved")} bubble={bubbles[item.id]} />)}</div>
-          {onEmote && player && <div className="emote-bar" role="group" aria-label="감정표현 보내기">{EMOTES.map((item) => <button key={item.key} type="button" onClick={() => onEmote(item.key)} aria-label={`${item.label}: ${mascotLine(player.avatar, item.key)}`} title={mascotLine(player.avatar, item.key)}>{item.emoji}</button>)}</div>}
+          <div className="players-stack">{game.players.map((item, index) => <PlayerPanel key={item.id} player={{ ...item, ...(lobbyById.get(item.id) || {}) }} active={index === game.turn && game.status !== "finished"} me={item.id === me?.id} canAct={canMainAction} onBuyReserved={(card) => buy(card, "reserved")} bubble={bubbles[item.id]} roundId={lobby?.roundId} />)}</div>
+          {onEmote && player && game.status === "playing" && <div className="emote-bar" role="group" aria-label="빠른 대화 보내기">{EMOTES.filter((item) => item.contexts.includes("playing")).map((item) => <button key={item.key} type="button" onClick={() => onEmote(item.key)} aria-label={`${item.label}: ${mascotLine(player.avatar, item.key)}`} title={mascotLine(player.avatar, item.key)}>{item.emoji}</button>)}{onStatus && player.lastGameRoundId === lobby?.roundId && <button className="cancel-last-game" type="button" onClick={() => onStatus({ lastGameCurrent: false })} aria-label="이번 판이 막판 설정 취소" title="막판 설정 취소">취소</button>}</div>}
           <ol className="game-log" aria-label="최근 행동">{game.log.slice(0, 2).map((line, index) => <li key={`${game.log.length}-${index}-${line}`}>{line}</li>)}</ol>
         </aside>
       </div>
       {game.pending?.type === "discard" && game.pending.playerId === me?.id && <DiscardModal player={player} count={game.pending.count} onConfirm={(tokens) => act({ type: "discard", tokens })} />}
       {game.pending?.type === "noble" && game.pending.playerId === me?.id && <NobleModal nobles={game.nobles.filter((noble) => game.pending.nobleIds.includes(noble.id))} onChoose={(nobleId) => act({ type: "noble", nobleId })} />}
-      {game.status === "finished" && <WinnerModal game={game} me={me} onLeave={onLeave} onRematch={onRematch} rematchNote={rematchNote} />}
+      {game.status === "finished" && <WinnerModal game={game} lobby={lobby} me={me} onLeave={onLeave} onRematch={onRematch} rematchPending={rematchPending} emote={emote} onEmote={onEmote} onStatus={onStatus} />}
       <RulesDialog />
     </main>
   );
@@ -682,10 +728,57 @@ function NobleModal({ nobles, onChoose }) {
   return <div className="modal-backdrop"><div className="choice-modal"><div className="eyebrow"><Crown size={15} /> 귀족 방문</div><h2>맞이할 귀족을 골라주세요</h2><p>한 턴에는 귀족 한 명만 방문할 수 있어요.</p><div className="noble-choice">{nobles.map((noble) => <NobleCard key={noble.id} noble={noble} selectable onClick={() => onChoose(noble.id)} />)}</div></div></div>;
 }
 
-function WinnerModal({ game, me, onLeave, onRematch, rematchNote }) {
+function RematchPlayer({ player, hostId, meId, roundId, bubble }) {
+  const isHost = player.id === hostId;
+  const finishedLastGame = player.lastGameRoundId === roundId;
+  const status = !player.connected ? "연결 기다림" : player.leaveIntent ? "여기까지" : player.waiting ? "잠시 대기" : isHost ? "방장" : player.ready ? "준비 완료" : "대기 중";
+  return (
+    <div className={`rematch-player ${player.ready ? "is-ready" : ""} ${!player.connected ? "is-offline" : ""}`}>
+      {bubble && <p className="rematch-speech" role="status"><b>{bubble.emoji}</b>{bubble.text}</p>}
+      <Avatar avatar={player.avatar} />
+      <strong>{player.name}{player.id === meId ? " · 나" : ""}</strong>
+      <small>{isHost ? <Crown size={12} /> : player.ready ? <CheckCircle2 size={12} /> : player.waiting ? <Hourglass size={12} /> : <Circle size={12} />}{status}</small>
+      {player.lastGamePending && <span className="status-badge last-next"><Star size={10} fill="currentColor" /> 다음 판 막판</span>}
+      {finishedLastGame && <span className="status-badge last-done"><Star size={10} fill="currentColor" /> 막판 완료</span>}
+    </div>
+  );
+}
+
+function WinnerModal({ game, lobby, me, onLeave, onRematch, rematchPending, emote, onEmote, onStatus }) {
   const winners = game.players.filter((player) => game.winnerIds.includes(player.id));
   const won = game.winnerIds.includes(me?.id);
   const ranked = [...game.players].sort((a, b) => playerScore(b) - playerScore(a) || a.cards.length - b.cards.length);
+  const [bubble, setBubble] = useState(null);
+  useEffect(() => {
+    if (!emote?.id) return undefined;
+    const sender = lobby?.players.find((player) => player.id === emote.playerId);
+    const item = EMOTES.find((entry) => entry.key === emote.key);
+    if (!sender || !item) return undefined;
+    const next = { id: emote.id, playerId: sender.id, emoji: item.emoji, text: mascotLine(sender.avatar, emote.key) };
+    setBubble(next);
+    const timer = setTimeout(() => setBubble((current) => current?.id === next.id ? null : current), 3_000);
+    return () => clearTimeout(timer);
+  }, [emote, lobby?.players]);
+
+  const roomPlayers = lobby?.players || [];
+  const isHost = lobby?.hostId === me?.id;
+  const meState = roomPlayers.find((player) => player.id === me?.id);
+  const guests = roomPlayers.filter((player) => player.id !== lobby?.hostId);
+  const readyCount = guests.filter((player) => player.ready).length;
+  const disconnected = roomPlayers.find((player) => !player.connected);
+  const unresolvedLastGame = roomPlayers.find((player) => player.lastGameRoundId === lobby?.roundId);
+  const allReady = guests.length > 0 && readyCount === guests.length;
+  const canStart = roomPlayers.length >= 2 && allReady && !disconnected && !unresolvedLastGame && !rematchPending;
+  const waitMessage = roomPlayers.length < 2
+    ? "친구 한 명이 더 필요해요."
+    : disconnected
+      ? `${disconnected.name}님의 연결을 기다리고 있어요.`
+      : unresolvedLastGame
+        ? `${unresolvedLastGame.name}님이 한 판 더 할지 선택하고 있어요.`
+        : allReady
+          ? "모두 준비됐어요! 방장이 시작할 수 있어요."
+          : `${guests.length - readyCount}명의 준비를 기다리고 있어요.`;
+  const multiplayerRematch = Boolean(lobby && onStatus);
   return (
     <div className="modal-backdrop celebration"><div className="winner-modal" role="dialog" aria-modal="true" aria-label="게임 결과">
       <div className="confetti" aria-hidden="true">{Array.from({ length: 28 }, (_, index) => <i key={index} className={`shape-${["diamond", "hexagon", "octagon", "ruby", "star"][index % 5]}`} style={{ "--x": `${(index * 37) % 100}%`, "--d": `${(index % 7) * 0.35}s`, "--t": `${2.6 + (index % 5) * 0.5}s`, "--c": ["#f6f1e7", "#2f80ed", "#27ae60", "#eb3b5a", "#f2b705"][index % 5], "--s": `${12 + (index % 4) * 5}px` }} />)}</div>
@@ -695,8 +788,15 @@ function WinnerModal({ game, me, onLeave, onRematch, rematchNote }) {
       <h1>{winners.map((player) => player.name).join(", ")} 승리</h1>
       <p>동점일 때는 구매한 개발 카드가 더 적은 플레이어가 승리해요.</p>
       <div className="scoreboard">{ranked.map((player, index) => <div key={player.id} className={game.winnerIds.includes(player.id) ? "is-winner" : ""}><b>{index + 1}</b><Avatar avatar={player.avatar} /><span>{player.name}{player.id === me?.id ? " · 나" : ""}</span><strong>{playerScore(player)}점</strong><small>카드 {player.cards.length}장 · 귀족 {player.nobles.length}</small></div>)}</div>
-      {onRematch && <button className="primary-button" onClick={onRematch}><RotateCcw size={18} /> 같은 방에서 다시하기</button>}
-      {!onRematch && rematchNote && <div className="waiting-pill"><span /> {rematchNote}</div>}
+      {multiplayerRematch ? <section className="rematch-room" aria-label="다음 게임 준비">
+        <div className="rematch-heading"><div><span>다음 게임 준비</span><strong>{readyCount}/{guests.length}명</strong></div><p aria-live="polite">{waitMessage}</p></div>
+        <div className="rematch-roster">{roomPlayers.map((player) => <RematchPlayer key={player.id} player={player} hostId={lobby.hostId} meId={me?.id} roundId={lobby.roundId} bubble={bubble?.playerId === player.id ? bubble : null} />)}</div>
+        {meState?.lastGameRoundId === lobby.roundId ? <button className="primary-button one-more-choice" onClick={() => onStatus({ continuePlaying: true, ...(isHost ? {} : { ready: true }) })}><RotateCcw size={18} /> 한 판 더 할게요</button> : <div className="rematch-controls">
+          {isHost ? <button className="primary-button" disabled={!canStart} onClick={onRematch}><Play size={18} fill="currentColor" /> {rematchPending ? "시작하는 중…" : canStart ? "다음 게임 시작" : "모두의 준비를 기다려요"}</button> : <button className={`primary-button ready-button ${meState?.ready ? "is-ready" : ""}`} onClick={() => onStatus({ ready: !meState?.ready })}>{meState?.ready ? <><CheckCircle2 size={18} /> 준비 취소</> : <><Circle size={18} /> 준비 완료</>}</button>}
+          <button className={`last-game-toggle ${meState?.lastGamePending ? "is-active" : ""}`} onClick={() => meState?.lastGamePending ? onStatus({ lastGamePending: false }) : onEmote("last_next")}><Star size={16} fill={meState?.lastGamePending ? "currentColor" : "none"} /> {meState?.lastGamePending ? "막판 설정 취소" : "다음 판이 막판"}</button>
+        </div>}
+        <details className="quick-chat"><summary><MessageCircle size={16} /> 빠른 대화</summary><div>{QUICK_CHATS.map((item) => <button key={item.key} type="button" onClick={() => onEmote(item.key)}><span>{item.emoji}</span>{item.text}</button>)}</div></details>
+      </section> : <>{onRematch && <button className="primary-button" onClick={onRematch}><RotateCcw size={18} /> 같은 방에서 다시하기</button>}</>}
       <button className="text-button winner-leave" onClick={onLeave}><LogOut size={16} /> 나가기</button>
     </div></div>
   );
@@ -779,7 +879,7 @@ export default function App() {
     <>
       {multiplayer.mode === "landing" && <Landing onHost={multiplayer.hostRoom} onJoin={multiplayer.joinRoom} onSolo={(profile, difficulty) => setSoloConfig({ profile, difficulty })} onTutorial={() => setTutorialOpen(true)} onResume={multiplayer.resumeSaved} onCancel={multiplayer.leave} connecting={multiplayer.connectionState} status={multiplayer.connectStatus} />}
       {multiplayer.mode === "lobby" && <Lobby lobby={multiplayer.lobby} me={multiplayer.me} isHost={multiplayer.isHost} onStart={multiplayer.startGame} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} />}
-      {multiplayer.mode === "game" && multiplayer.game && <GameBoard game={multiplayer.game} me={multiplayer.me} roomCode={multiplayer.roomCode} onAction={multiplayer.sendAction} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} onRematch={multiplayer.isHost ? multiplayer.rematch : null} rematchNote="방장이 다시하기를 누르면 바로 새 판이 시작돼요" emote={multiplayer.emote} onEmote={multiplayer.sendEmote} />}
+      {multiplayer.mode === "game" && multiplayer.game && <GameBoard game={multiplayer.game} lobby={multiplayer.lobby} me={multiplayer.me} roomCode={multiplayer.roomCode} onAction={multiplayer.sendAction} onLeave={multiplayer.leave} onTutorial={() => setTutorialOpen(true)} onRematch={multiplayer.isHost ? multiplayer.rematch : null} rematchPending={multiplayer.rematchPending} emote={multiplayer.emote} onEmote={multiplayer.sendEmote} onStatus={multiplayer.setStatus} />}
       {multiplayer.connectionState === "reconnecting" && multiplayer.mode !== "landing" && <ReconnectPill onRetry={multiplayer.retryNow} onLeave={multiplayer.leave} />}
       {multiplayer.error && <div className="global-error"><span>{multiplayer.error}</span><button onClick={() => multiplayer.setError("")} aria-label="오류 닫기"><X size={18} /></button></div>}
     </>

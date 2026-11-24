@@ -5,6 +5,7 @@ import { EMOTES } from "../mascots.js";
 
 export const ROOM_TTL_SECONDS = 12 * 60 * 60;
 export const PRESENCE_TTL_SECONDS = 35;
+export const QUICK_CHAT_TTL_MS = 3_000;
 const CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const VALID_AVATARS = new Set(["chiikawa", "hachiware", "usagi", "kurimanju", "ode", "momonga"]);
 
@@ -48,29 +49,73 @@ function authenticate(record, playerId, token) {
   }
 }
 
-function publicState(record, version, presence = {}, viewerId = "") {
-  const connectedPlayers = record.players.map((player) => ({ ...player, connected: Boolean(presence[player.id]) }));
+function socialFor(record, playerId) {
+  return {
+    ready: false,
+    waiting: false,
+    leaveIntent: false,
+    lastGamePending: false,
+    lastGameRoundId: null,
+    ...(record.social?.[playerId] || {}),
+  };
+}
+
+function resetForRematch(record) {
+  record.status = "rematch";
+  record.social ||= {};
+  for (const player of record.players) {
+    record.social[player.id] = { ...socialFor(record, player.id), ready: false, waiting: false, leaveIntent: false };
+  }
+}
+
+function beginGame(record, roomCode, seed) {
+  record.roundNumber = (Number(record.roundNumber) || 0) + 1;
+  record.roundId = `${roomCode}-${record.roundNumber}`;
+  record.status = "playing";
+  record.social ||= {};
+  for (const player of record.players) {
+    const social = socialFor(record, player.id);
+    record.social[player.id] = {
+      ...social,
+      ready: false,
+      waiting: false,
+      leaveIntent: false,
+      lastGameRoundId: social.lastGamePending ? record.roundId : null,
+      lastGamePending: false,
+    };
+  }
+  record.game = createGame(record.players, roomCode, seed);
+  record.gameVersion = (Number(record.gameVersion) || 0) + 1;
+  record.emote = null;
+}
+
+function publicState(record, version, presence = {}, viewerId = "", { includeGame = true } = {}) {
+  const connectedPlayers = record.players.map((player) => ({ ...player, ...socialFor(record, player.id), connected: Boolean(presence[player.id]) }));
   const connectedById = Object.fromEntries(connectedPlayers.map((player) => [player.id, player.connected]));
-  const gameView = record.game ? viewFor(record.game, viewerId) : null;
+  const gameView = includeGame && record.game ? viewFor(record.game, viewerId) : null;
   const game = gameView ? {
     ...gameView,
     players: gameView.players.map((player) => ({
       ...player,
+      ...socialFor(record, player.id),
       connected: Boolean(connectedById[player.id]),
     })),
   } : null;
-  return {
+  const result = {
     version,
+    gameVersion: Number(record.gameVersion) || 0,
     serverTime: Date.now(),
     lobby: {
       roomCode: record.roomCode,
       status: record.status,
       hostId: record.hostId,
+      roundId: record.roundId || null,
       players: connectedPlayers,
     },
-    game,
-    emote: record.emote || null,
+    emote: record.emote?.expiresAt > Date.now() ? record.emote : null,
   };
+  if (includeGame) result.game = game;
+  return result;
 }
 
 function rememberAction(record, actionId) {
@@ -85,9 +130,9 @@ async function loadAuthorized(store, codeInput, playerId, token) {
   return { code, ...snapshot };
 }
 
-async function withPresence(store, snapshot, viewerId) {
+async function withPresence(store, snapshot, viewerId, options) {
   const presence = await store.getPresence(snapshot.record.roomCode, snapshot.record.players.map((player) => player.id));
-  return publicState(snapshot.record, snapshot.version, presence, viewerId);
+  return publicState(snapshot.record, snapshot.version, presence, viewerId, options);
 }
 
 async function commit(store, code, snapshot, nextRecord) {
@@ -105,6 +150,8 @@ async function advanceExpiredTurn(store, code, snapshot) {
   if (!timedOutPlayer) return snapshot;
   const nextRecord = structuredClone(snapshot.record);
   nextRecord.game = playTimedTurn(nextRecord.game, timedOutPlayer.id);
+  nextRecord.gameVersion = (Number(nextRecord.gameVersion) || 0) + 1;
+  if (nextRecord.game.status === "finished") resetForRematch(nextRecord);
   try {
     return await commit(store, code, snapshot, nextRecord);
   } catch (error) {
@@ -129,7 +176,11 @@ export function createRoomService(store) {
           hostId: profile.id,
           players: [profile],
           sessions: { [profile.id]: tokenHash(sessionToken) },
+          social: { [profile.id]: socialFor({}, profile.id) },
           game: null,
+          gameVersion: 0,
+          roundNumber: 0,
+          roundId: null,
           emote: null,
           emoteAt: {},
           processedActionIds: [],
@@ -156,12 +207,14 @@ export function createRoomService(store) {
           await store.markPresence(code, profile.id, PRESENCE_TTL_SECONDS);
           return { sessionToken, ...(await withPresence(store, snapshot, profile.id)) };
         }
-        if (snapshot.record.status !== "waiting") throw roomError("이미 게임이 시작된 방이에요.", 409, "GAME_STARTED");
+        if (!["waiting", "rematch"].includes(snapshot.record.status)) throw roomError("이미 게임이 시작된 방이에요.", 409, "GAME_STARTED");
         if (snapshot.record.players.length >= 4) throw roomError("방이 가득 찼어요.", 409, "ROOM_FULL");
         const nextToken = createSessionToken();
         const nextRecord = structuredClone(snapshot.record);
         nextRecord.players.push(profile);
         nextRecord.sessions[profile.id] = tokenHash(nextToken);
+        nextRecord.social ||= {};
+        nextRecord.social[profile.id] = socialFor(nextRecord, profile.id);
         try {
           const committed = await commit(store, code, snapshot, nextRecord);
           await store.markPresence(code, profile.id, PRESENCE_TTL_SECONDS);
@@ -173,13 +226,19 @@ export function createRoomService(store) {
       throw roomError("여러 친구가 동시에 입장했어요. 한 번만 다시 눌러주세요.", 409, "JOIN_CONFLICT");
     },
 
-    async sync({ code: codeInput, playerId, sessionToken, knownVersion = 0 }) {
+    async sync({ code: codeInput, playerId, sessionToken, knownVersion = 0, knownGameVersion = -1 }) {
       let snapshot = await loadAuthorized(store, codeInput, playerId, sessionToken);
       snapshot = await advanceExpiredTurn(store, snapshot.code, snapshot);
+      if (snapshot.record.game?.status === "finished" && snapshot.record.status !== "rematch") {
+        const nextRecord = structuredClone(snapshot.record);
+        resetForRematch(nextRecord);
+        try { snapshot = await commit(store, snapshot.code, snapshot, nextRecord); }
+        catch (error) { if (error.code !== "VERSION_CONFLICT") throw error; snapshot = await store.getRoom(snapshot.code); }
+      }
       if (Number(knownVersion) === snapshot.version) {
         return { unchanged: true, version: snapshot.version, serverTime: Date.now() };
       }
-      return withPresence(store, snapshot, playerId);
+      return withPresence(store, snapshot, playerId, { includeGame: Number(knownGameVersion) !== (Number(snapshot.record.gameVersion) || 0) });
     },
 
     async start({ code: codeInput, playerId, sessionToken }) {
@@ -188,8 +247,7 @@ export function createRoomService(store) {
       if (snapshot.record.status !== "waiting") return withPresence(store, snapshot, playerId);
       if (snapshot.record.players.length < 2) throw roomError("친구가 한 명 이상 들어와야 시작할 수 있어요.");
       const nextRecord = structuredClone(snapshot.record);
-      nextRecord.status = "playing";
-      nextRecord.game = createGame(nextRecord.players, snapshot.code);
+      beginGame(nextRecord, snapshot.code, snapshot.code);
       return withPresence(store, await commit(store, snapshot.code, snapshot, nextRecord), playerId);
     },
 
@@ -204,30 +262,83 @@ export function createRoomService(store) {
       } catch (error) {
         throw roomError(error instanceof Error ? error.message : "선택한 행동을 진행할 수 없어요.", 400, "INVALID_ACTION");
       }
+      nextRecord.gameVersion = (Number(nextRecord.gameVersion) || 0) + 1;
+      if (nextRecord.game.status === "finished") resetForRematch(nextRecord);
       rememberAction(nextRecord, actionId);
       return withPresence(store, await commit(store, snapshot.code, snapshot, nextRecord), playerId);
     },
 
-    async rematch({ code: codeInput, playerId, sessionToken }) {
+    async rematch({ code: codeInput, playerId, sessionToken, startRequestId = "" }) {
       const snapshot = await loadAuthorized(store, codeInput, playerId, sessionToken);
       if (snapshot.record.hostId !== playerId) throw roomError("방장만 다시 시작할 수 있어요.", 403, "HOST_ONLY");
-      if (snapshot.record.game?.status !== "finished") throw roomError("게임이 끝난 뒤 다시 시작할 수 있어요.", 409, "GAME_NOT_FINISHED");
+      if (snapshot.record.lastStartRequestId && snapshot.record.lastStartRequestId === startRequestId) return withPresence(store, snapshot, playerId);
+      if (!startRequestId || typeof startRequestId !== "string" || startRequestId.length > 100) throw roomError("시작 요청 식별자가 필요해요.");
+      if (snapshot.record.status !== "rematch" || snapshot.record.game?.status !== "finished") throw roomError("게임이 끝난 뒤 다시 시작할 수 있어요.", 409, "GAME_NOT_FINISHED");
+      if (snapshot.record.players.length < 2) throw roomError("친구가 한 명 이상 있어야 다시 시작할 수 있어요.", 409, "NOT_ENOUGH_PLAYERS");
+      const presence = await store.getPresence(snapshot.code, snapshot.record.players.map((player) => player.id));
+      const disconnected = snapshot.record.players.find((player) => !presence[player.id]);
+      if (disconnected) throw roomError(`${disconnected.name}님의 연결을 기다리고 있어요.`, 409, "PLAYER_DISCONNECTED");
+      const unfinishedLastGame = snapshot.record.players.find((player) => socialFor(snapshot.record, player.id).lastGameRoundId === snapshot.record.roundId);
+      if (unfinishedLastGame) throw roomError(`${unfinishedLastGame.name}님이 한 판 더 할지 선택하고 있어요.`, 409, "LAST_GAME_CHOICE_REQUIRED");
+      const notReady = snapshot.record.players.find((player) => player.id !== snapshot.record.hostId && !socialFor(snapshot.record, player.id).ready);
+      if (notReady) throw roomError(`${notReady.name}님의 준비를 기다리고 있어요.`, 409, "PLAYERS_NOT_READY");
       const nextRecord = structuredClone(snapshot.record);
       nextRecord.players = [...nextRecord.players.slice(1), nextRecord.players[0]];
-      nextRecord.game = createGame(nextRecord.players, snapshot.code, `${snapshot.code}-${Date.now()}`);
-      nextRecord.emote = null;
+      beginGame(nextRecord, snapshot.code, `${snapshot.code}-${Date.now()}`);
+      nextRecord.lastStartRequestId = startRequestId;
       return withPresence(store, await commit(store, snapshot.code, snapshot, nextRecord), playerId);
+    },
+
+    async status({ code: codeInput, playerId, sessionToken, eventId = "", ready, lastGamePending, continuePlaying, lastGameCurrent }) {
+      const snapshot = await loadAuthorized(store, codeInput, playerId, sessionToken);
+      if (!eventId || typeof eventId !== "string" || eventId.length > 100) throw roomError("상태 변경 식별자가 필요해요.");
+      if (snapshot.record.processedActionIds?.includes(eventId)) return withPresence(store, snapshot, playerId, { includeGame: false });
+      const nextRecord = structuredClone(snapshot.record);
+      nextRecord.social ||= {};
+      const social = socialFor(nextRecord, playerId);
+      if (snapshot.record.status === "playing") {
+        if (typeof lastGameCurrent !== "boolean") throw roomError("게임 중에는 현재 판의 막판 상태만 바꿀 수 있어요.", 409, "STATUS_NOT_ALLOWED");
+        social.lastGameRoundId = lastGameCurrent ? snapshot.record.roundId : null;
+      } else if (snapshot.record.status === "rematch") {
+        if (typeof ready === "boolean") {
+          if (playerId === snapshot.record.hostId) throw roomError("방장은 시작 버튼으로 참여 의사를 표시해요.", 409, "HOST_READY_NOT_REQUIRED");
+          social.ready = ready;
+          if (ready) {
+            social.waiting = false;
+            social.leaveIntent = false;
+            if (social.lastGameRoundId === snapshot.record.roundId) social.lastGameRoundId = null;
+          }
+        }
+        if (typeof lastGamePending === "boolean") social.lastGamePending = lastGamePending;
+        if (continuePlaying === true && social.lastGameRoundId === snapshot.record.roundId) social.lastGameRoundId = null;
+        if (typeof ready !== "boolean" && typeof lastGamePending !== "boolean" && continuePlaying !== true) throw roomError("바꿀 상태를 확인해주세요.");
+      } else {
+        throw roomError("지금은 이 상태를 바꿀 수 없어요.", 409, "STATUS_NOT_ALLOWED");
+      }
+      nextRecord.social[playerId] = social;
+      rememberAction(nextRecord, eventId);
+      return withPresence(store, await commit(store, snapshot.code, snapshot, nextRecord), playerId, { includeGame: false });
     },
 
     async emote({ code: codeInput, playerId, sessionToken, key, emoteId = "" }) {
       const snapshot = await loadAuthorized(store, codeInput, playerId, sessionToken);
-      if (!EMOTES.some((item) => item.key === key)) throw roomError("알 수 없는 감정표현이에요.");
+      const emote = EMOTES.find((item) => item.key === key);
+      if (!emote) throw roomError("알 수 없는 감정표현이에요.");
+      const context = snapshot.record.status === "rematch" ? "rematch" : "playing";
+      if (!emote.contexts.includes(context)) throw roomError("지금은 보낼 수 없는 말이에요.", 409, "CHAT_NOT_ALLOWED");
       const lastAt = snapshot.record.emoteAt?.[playerId] || 0;
-      if (Date.now() - lastAt < 800) return withPresence(store, snapshot, playerId);
+      if (Date.now() - lastAt < 1_000) return withPresence(store, snapshot, playerId, { includeGame: false });
       const nextRecord = structuredClone(snapshot.record);
       nextRecord.emoteAt = { ...(nextRecord.emoteAt || {}), [playerId]: Date.now() };
-      nextRecord.emote = { id: typeof emoteId === "string" && emoteId.length <= 100 && emoteId ? emoteId : `${Date.now()}-${playerId}`, playerId, key };
-      return withPresence(store, await commit(store, snapshot.code, snapshot, nextRecord), playerId);
+      nextRecord.emote = { id: typeof emoteId === "string" && emoteId.length <= 100 && emoteId ? emoteId : `${Date.now()}-${playerId}`, playerId, key, expiresAt: Date.now() + QUICK_CHAT_TTL_MS };
+      nextRecord.social ||= {};
+      const social = socialFor(nextRecord, playerId);
+      if (context === "rematch" && key === "wait" && playerId !== nextRecord.hostId) Object.assign(social, { ready: false, waiting: true, leaveIntent: false });
+      if (context === "rematch" && key === "last_next") social.lastGamePending = true;
+      if (context === "rematch" && key === "leave_intent") Object.assign(social, { ready: false, waiting: false, leaveIntent: true });
+      if (context === "playing" && key === "last_current") social.lastGameRoundId = nextRecord.roundId;
+      nextRecord.social[playerId] = social;
+      return withPresence(store, await commit(store, snapshot.code, snapshot, nextRecord), playerId, { includeGame: false });
     },
 
     async heartbeat({ code: codeInput, playerId, sessionToken }) {
@@ -239,10 +350,11 @@ export function createRoomService(store) {
     async leave({ code: codeInput, playerId, sessionToken }) {
       const snapshot = await loadAuthorized(store, codeInput, playerId, sessionToken);
       await store.removePresence(snapshot.code, playerId);
-      if (snapshot.record.status !== "waiting") return { ok: true };
+      if (snapshot.record.status === "playing") return { ok: true };
       const nextRecord = structuredClone(snapshot.record);
       nextRecord.players = nextRecord.players.filter((player) => player.id !== playerId);
       delete nextRecord.sessions[playerId];
+      if (nextRecord.social) delete nextRecord.social[playerId];
       if (!nextRecord.players.length) {
         await store.deleteRoom(snapshot.code);
         return { ok: true, deleted: true };

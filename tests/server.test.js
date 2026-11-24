@@ -17,6 +17,13 @@ async function makeFourPlayerRoom() {
   return { store, service, host, sessions };
 }
 
+async function finishRoom(store, service, code, session) {
+  const snapshot = await store.getRoom(code);
+  snapshot.record.game.status = "finished";
+  await store.compareAndSetRoom(code, snapshot.version, snapshot.version + 1, snapshot.record, 3600);
+  return service.sync({ code, playerId: session.profile.id, sessionToken: session.token, knownVersion: 0, knownGameVersion: 0 });
+}
+
 test("권위 서버가 4명 참가와 4인용 공급처를 안정적으로 만든다", async () => {
   const { service, host, sessions } = await makeFourPlayerRoom();
   const started = await service.start({ code: host.lobby.roomCode, playerId: sessions[0].profile.id, sessionToken: sessions[0].token });
@@ -132,12 +139,131 @@ test("감정표현과 같은 방 다시하기도 서버를 통해 모든 참가�
     key: "hello",
     emoteId: "shared-emote",
   });
-  assert.deepEqual(reacted.emote, { id: "shared-emote", playerId: profile(2).id, key: "hello" });
-  const snapshot = await store.getRoom(created.lobby.roomCode);
-  snapshot.record.game.status = "finished";
-  await store.compareAndSetRoom(created.lobby.roomCode, snapshot.version, snapshot.version + 1, snapshot.record, 3600);
-  const rematch = await service.rematch({ code: created.lobby.roomCode, playerId: profile(1).id, sessionToken: created.sessionToken });
+  assert.deepEqual({ ...reacted.emote, expiresAt: undefined }, { id: "shared-emote", playerId: profile(2).id, key: "hello", expiresAt: undefined });
+  assert.ok(reacted.emote.expiresAt > Date.now());
+  await finishRoom(store, service, created.lobby.roomCode, { profile: profile(1), token: created.sessionToken });
+  await service.status({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: guest.sessionToken, eventId: "guest-ready", ready: true });
+  const rematch = await service.rematch({ code: created.lobby.roomCode, playerId: profile(1).id, sessionToken: created.sessionToken, startRequestId: "rematch-1" });
   assert.equal(rematch.game.status, "playing");
   assert.equal(rematch.game.players[0].id, profile(2).id);
   assert.equal(rematch.lobby.hostId, profile(1).id);
+});
+
+test("재경기는 일반 플레이어 전원 Ready 이후에도 방장이 눌러야 시작된다", async () => {
+  const { store, service, host, sessions } = await makeFourPlayerRoom();
+  const code = host.lobby.roomCode;
+  await service.start({ code, playerId: sessions[0].profile.id, sessionToken: sessions[0].token });
+  await finishRoom(store, service, code, sessions[0]);
+  await assert.rejects(
+    service.rematch({ code, playerId: sessions[0].profile.id, sessionToken: sessions[0].token, startRequestId: "too-early" }),
+    (error) => error.code === "PLAYERS_NOT_READY",
+  );
+  for (const [index, session] of sessions.slice(1).entries()) {
+    await service.status({ code, playerId: session.profile.id, sessionToken: session.token, eventId: `ready-${index}`, ready: true });
+  }
+  const waiting = await service.sync({ code, playerId: sessions[0].profile.id, sessionToken: sessions[0].token, knownVersion: 0, knownGameVersion: 0 });
+  assert.equal(waiting.lobby.status, "rematch");
+  assert.equal(waiting.game.status, "finished");
+  const started = await service.rematch({ code, playerId: sessions[0].profile.id, sessionToken: sessions[0].token, startRequestId: "ready-start" });
+  assert.equal(started.lobby.status, "playing");
+  assert.equal(started.game.status, "playing");
+  assert.equal(started.lobby.players.filter((player) => player.ready).length, 0);
+});
+
+test("Ready 취소와 재경기 시작이 겹치면 서버의 최신 상태가 우선한다", async () => {
+  const store = createMemoryRoomStore();
+  const service = createRoomService(store);
+  const created = await service.create(profile(1));
+  const guest = await service.join({ code: created.lobby.roomCode, profile: profile(2) });
+  const hostSession = { profile: profile(1), token: created.sessionToken };
+  await service.start({ code: created.lobby.roomCode, playerId: profile(1).id, sessionToken: created.sessionToken });
+  await finishRoom(store, service, created.lobby.roomCode, hostSession);
+  await service.status({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: guest.sessionToken, eventId: "ready-on", ready: true });
+  await service.status({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: guest.sessionToken, eventId: "ready-off", ready: false });
+  await assert.rejects(
+    service.rematch({ code: created.lobby.roomCode, playerId: profile(1).id, sessionToken: created.sessionToken, startRequestId: "after-cancel" }),
+    (error) => error.code === "PLAYERS_NOT_READY",
+  );
+});
+
+test("잠시만·여기까지·다음 판 막판은 Ready와 독립된 서버 상태로 동기화된다", async () => {
+  const store = createMemoryRoomStore();
+  const service = createRoomService(store);
+  const created = await service.create(profile(1));
+  const guest = await service.join({ code: created.lobby.roomCode, profile: profile(2) });
+  await service.start({ code: created.lobby.roomCode, playerId: profile(1).id, sessionToken: created.sessionToken });
+  await finishRoom(store, service, created.lobby.roomCode, { profile: profile(1), token: created.sessionToken });
+  await service.status({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: guest.sessionToken, eventId: "ready-first", ready: true });
+  const wait = await service.emote({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: guest.sessionToken, key: "wait", emoteId: "wait-chat" });
+  assert.equal(wait.lobby.players[1].ready, false);
+  assert.equal(wait.lobby.players[1].waiting, true);
+  const snapshot = await store.getRoom(created.lobby.roomCode);
+  snapshot.record.emoteAt[profile(2).id] = 0;
+  await store.compareAndSetRoom(created.lobby.roomCode, snapshot.version, snapshot.version + 1, snapshot.record, 3600);
+  const last = await service.emote({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: guest.sessionToken, key: "last_next", emoteId: "last-chat" });
+  assert.equal(last.lobby.players[1].lastGamePending, true);
+  assert.equal(last.lobby.players[1].ready, false);
+  const afterReady = await service.status({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: guest.sessionToken, eventId: "ready-again", ready: true });
+  assert.equal(afterReady.lobby.players[1].lastGamePending, true);
+  assert.equal(afterReady.lobby.players[1].waiting, false);
+});
+
+test("현재 판 막판은 취소 가능하며 지정한 다음 판에만 적용된다", async () => {
+  const store = createMemoryRoomStore();
+  const service = createRoomService(store);
+  const created = await service.create(profile(1));
+  const guest = await service.join({ code: created.lobby.roomCode, profile: profile(2) });
+  const started = await service.start({ code: created.lobby.roomCode, playerId: profile(1).id, sessionToken: created.sessionToken });
+  const set = await service.status({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: guest.sessionToken, eventId: "last-current", lastGameCurrent: true });
+  assert.equal(set.lobby.players[1].lastGameRoundId, started.lobby.roundId);
+  const cleared = await service.status({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: guest.sessionToken, eventId: "last-cancel", lastGameCurrent: false });
+  assert.equal(cleared.lobby.players[1].lastGameRoundId, null);
+  await finishRoom(store, service, created.lobby.roomCode, { profile: profile(1), token: created.sessionToken });
+  await service.status({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: guest.sessionToken, eventId: "last-next", lastGamePending: true });
+  await service.status({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: guest.sessionToken, eventId: "next-ready", ready: true });
+  const next = await service.rematch({ code: created.lobby.roomCode, playerId: profile(1).id, sessionToken: created.sessionToken, startRequestId: "next-round" });
+  assert.equal(next.lobby.players.find((player) => player.id === profile(2).id).lastGameRoundId, next.lobby.roundId);
+  assert.equal(next.lobby.players.find((player) => player.id === profile(2).id).lastGamePending, false);
+});
+
+test("상태·Quick Chat 변경은 큰 게임 본문을 다시 보내지 않는다", async () => {
+  const store = createMemoryRoomStore();
+  const service = createRoomService(store);
+  const created = await service.create(profile(1));
+  const guest = await service.join({ code: created.lobby.roomCode, profile: profile(2) });
+  const started = await service.start({ code: created.lobby.roomCode, playerId: profile(1).id, sessionToken: created.sessionToken });
+  await service.status({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: guest.sessionToken, eventId: "light-status", lastGameCurrent: true });
+  const delta = await service.sync({ code: created.lobby.roomCode, playerId: profile(1).id, sessionToken: created.sessionToken, knownVersion: started.version, knownGameVersion: started.gameVersion });
+  assert.equal(Object.hasOwn(delta, "game"), false);
+  assert.equal(delta.lobby.players[1].lastGameRoundId, started.lobby.roundId);
+});
+
+test("재경기 대기실 퇴장은 즉시 인원에서 빠지고 방장 권한이 이전된다", async () => {
+  const store = createMemoryRoomStore();
+  const service = createRoomService(store);
+  const created = await service.create(profile(1));
+  const guest = await service.join({ code: created.lobby.roomCode, profile: profile(2) });
+  await service.start({ code: created.lobby.roomCode, playerId: profile(1).id, sessionToken: created.sessionToken });
+  await finishRoom(store, service, created.lobby.roomCode, { profile: profile(1), token: created.sessionToken });
+  await service.leave({ code: created.lobby.roomCode, playerId: profile(1).id, sessionToken: created.sessionToken });
+  const remaining = await service.sync({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: guest.sessionToken, knownVersion: 0, knownGameVersion: -1 });
+  assert.equal(remaining.lobby.players.length, 1);
+  assert.equal(remaining.lobby.hostId, profile(2).id);
+});
+
+test("방장이 아닌 플레이어와 미인증 요청은 Ready 조건을 우회할 수 없다", async () => {
+  const store = createMemoryRoomStore();
+  const service = createRoomService(store);
+  const created = await service.create(profile(1));
+  const guest = await service.join({ code: created.lobby.roomCode, profile: profile(2) });
+  await service.start({ code: created.lobby.roomCode, playerId: profile(1).id, sessionToken: created.sessionToken });
+  await finishRoom(store, service, created.lobby.roomCode, { profile: profile(1), token: created.sessionToken });
+  await assert.rejects(
+    service.rematch({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: guest.sessionToken, startRequestId: "guest-start" }),
+    (error) => error.code === "HOST_ONLY",
+  );
+  await assert.rejects(
+    service.status({ code: created.lobby.roomCode, playerId: profile(2).id, sessionToken: "wrong", eventId: "forged", ready: true }),
+    (error) => error.code === "SESSION_EXPIRED",
+  );
 });

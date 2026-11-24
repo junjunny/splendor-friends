@@ -1,6 +1,6 @@
 import { serializeRoomError } from "./room-service.js";
 
-const allowedPostOperations = new Set(["create", "join", "sync", "start", "action", "rematch", "emote", "heartbeat", "leave"]);
+const allowedPostOperations = new Set(["create", "join", "sync", "start", "action", "rematch", "status", "emote", "heartbeat", "leave"]);
 
 export async function dispatchRoomRequest(service, { method, url, body = {} }) {
   try {
@@ -23,6 +23,7 @@ export async function dispatchRoomRequest(service, { method, url, body = {} }) {
     if (body.op === "start") return { status: 200, body: await service.start(body) };
     if (body.op === "action") return { status: 200, body: await service.action(body) };
     if (body.op === "rematch") return { status: 200, body: await service.rematch(body) };
+    if (body.op === "status") return { status: 200, body: await service.status(body) };
     if (body.op === "emote") return { status: 200, body: await service.emote(body) };
     if (body.op === "heartbeat") return { status: 200, body: await service.heartbeat(body) };
     return { status: 200, body: await service.leave(body) };

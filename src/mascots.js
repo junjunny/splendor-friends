@@ -1,15 +1,24 @@
 // 마스코트마다 말투가 달라요. 같은 감정표현도 고른 캐릭터에 따라 다른 대사로 나와요.
 // 글자는 직접 못 치고, 여기 정해진 표현만 보낼 수 있어요.
 export const EMOTES = [
-  { key: "hello", emoji: "👋", label: "인사" },
-  { key: "nice", emoji: "👏", label: "잘했어" },
-  { key: "happy", emoji: "🥰", label: "신나" },
-  { key: "ouch", emoji: "😭", label: "으악" },
-  { key: "think", emoji: "🤔", label: "고민 중" },
-  { key: "hurry", emoji: "⏰", label: "빨리" },
-  { key: "sorry", emoji: "🙏", label: "미안" },
-  { key: "gg", emoji: "🤝", label: "수고했어" },
+  { key: "hello", emoji: "👋", label: "인사", contexts: ["playing"] },
+  { key: "nice", emoji: "👏", label: "잘했어", contexts: ["playing"] },
+  { key: "happy", emoji: "🥰", label: "신나", contexts: ["playing"] },
+  { key: "ouch", emoji: "😭", label: "으악", contexts: ["playing"] },
+  { key: "think", emoji: "🤔", label: "고민 중", contexts: ["playing"] },
+  { key: "hurry", emoji: "⏰", label: "빨리", contexts: ["playing"] },
+  { key: "sorry", emoji: "🙏", label: "미안", contexts: ["playing"] },
+  { key: "gg", emoji: "🤝", label: "수고했어", text: "수고했어요!", contexts: ["playing", "rematch"] },
+  { key: "one_more", emoji: "🔥", label: "한 판 더", text: "한 판 더!", contexts: ["rematch"] },
+  { key: "last_question", emoji: "❓", label: "막판?", text: "막판?", contexts: ["playing", "rematch"] },
+  { key: "last_current", emoji: "☝️", label: "이번 판이 막판", text: "이번 판이 막판!", contexts: ["playing"] },
+  { key: "last_next", emoji: "☝️", label: "다음 판이 막판", text: "다음 판이 막판!", contexts: ["rematch"] },
+  { key: "wait", emoji: "✋", label: "잠시만", text: "잠시만!", contexts: ["rematch"] },
+  { key: "agree", emoji: "👍", label: "좋아요", text: "좋아요!", contexts: ["rematch"] },
+  { key: "leave_intent", emoji: "👋", label: "여기까지", text: "여기까지 할게요!", contexts: ["rematch"] },
 ];
+
+export const QUICK_CHATS = EMOTES.filter((item) => item.contexts.includes("rematch"));
 
 const LINES = {
   chiikawa: {
@@ -40,6 +49,8 @@ const LINES = {
 const LEGACY = { ruby: "chiikawa", sapphire: "hachiware", emerald: "usagi", diamond: "momonga" };
 
 export function mascotLine(avatar, key) {
+  const fixed = EMOTES.find((item) => item.key === key)?.text;
+  if (fixed) return fixed;
   const lines = LINES[LEGACY[avatar] || avatar] || LINES.chiikawa;
   return lines[key] || "";
 }
